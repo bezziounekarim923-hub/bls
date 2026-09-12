@@ -247,10 +247,29 @@ Le script gère ça tout seul, en trois temps :
      navigation. Une resynchronisation complète a lieu toutes les
      `SOFT_RESYNC_EVERY` vérifications (20 par défaut).
 2. **Réparation automatique** — si le calendrier disparaît quand même, le
-   script cherche un lien/bouton pour le réafficher (« book appointment »,
-   « select date », « continuer »…). Les liens à risque (annuler, supprimer,
-   payer, déconnexion) sont **systématiquement ignorés** : « cancel
-   appointment » contient aussi le mot « appointment ».
+   script rejoue le parcours de clics qui y mène. Sur BLS, ce parcours est
+   connu et codé en dur :
+
+   ```
+   /manage-appointments
+     └─ bouton « More actions »   (data-slot="dropdown-menu-trigger", aria-haspopup="menu")
+          └─ « Continue to slot selection »   (div role="menuitem", data-slot="dropdown-menu-item")
+               └─ calendrier des créneaux
+   ```
+
+   L'entrée de menu est un `<div role="menuitem">` qui **n'existe dans le DOM
+   qu'une fois le menu ouvert** : le script ouvre donc d'abord le menu, puis
+   cherche l'entrée. Plusieurs rendez-vous = plusieurs boutons « More actions »
+   : ils sont essayés un par un (`MAX_DROPDOWN_TRIGGERS`, 4 par défaut), le
+   menu étant refermé (Échap) entre deux essais. D'autres libellés sont aussi
+   reconnus (« select date », « book appointment », « choisir un créneau »…),
+   et le clic est robuste (clic natif → recentrage → clic JavaScript), les
+   menus Radix étant rendus dans un portail.
+
+   Les liens à risque (annuler, supprimer, payer, déconnexion) sont
+   **systématiquement ignorés** — y compris **à l'intérieur des menus** :
+   « Cancel Appointment » et « Continue to slot selection » sont dans le même
+   menu, et le premier contient aussi le mot « appointment ».
 3. **Invite ciblée** — si rien n'y fait, le script te demande de réafficher le
    calendrier dans Chrome (`MAX_MANUAL_PROMPTS` fois). **Relancer Chrome ne
    ramènerait pas un calendrier perdu par une SPA** : la relance n'est donc
@@ -276,6 +295,7 @@ blocage.
 | `APPOINTMENT_URL` | vide | URL directe du calendrier |
 | `REFRESH_MODE` | auto | `auto` / `reload` / `soft` (calendrier SPA) |
 | `SOFT_RESYNC_EVERY` | 20 | resynchronisations complètes en mode `soft` |
+| `MAX_DROPDOWN_TRIGGERS` | 4 | menus « More actions » essayés pour retrouver le calendrier |
 | `MAX_MANUAL_PROMPTS` | 2 | invites « réaffiche le calendrier » avant dernier recours |
 | `SCAN_NEXT_MONTH` | 1 | scanner aussi le mois suivant |
 | `NEXT_MONTH_SCAN_EVERY` | 2 | scanner le mois suivant 1 fois sur N |

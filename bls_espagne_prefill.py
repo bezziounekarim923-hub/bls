@@ -323,6 +323,12 @@ BOOKING_HREF_KEYWORDS = ["appointment", "booking", "schedule", "book", "demande"
 # Textes supplémentaires testés pour retrouver le calendrier après un
 # rechargement (le parcours BLS passe souvent par un bouton d'étape)
 BOOKING_STEP_TEXTS = [
+    "continue to slot selection",
+    "slot selection",
+    "select slot",
+    "choose slot",
+    "continue to booking",
+    "book slot",
     "select date",
     "choose date",
     "select appointment date",
@@ -337,6 +343,46 @@ BOOKING_STEP_TEXTS = [
     "sélectionner une date",
     "date de rendez-vous",
 ]
+
+# ---- Menu déroulant « More actions » (Radix UI) ---------------------------
+# Sur /manage-appointments, le calendrier s'atteint en DEUX clics :
+#   1. le bouton « More actions » (déclencheur de menu déroulant),
+#   2. l'entrée « Continue to slot selection » du menu.
+# Cette entrée est un <div role="menuitem"> qui n'existe dans le DOM qu'une
+# fois le menu ouvert : la chercher sans ouvrir le menu ne sert à rien.
+DROPDOWN_TRIGGER_CSS = (
+    "[data-slot='dropdown-menu-trigger'], [aria-haspopup='menu'], "
+    "[aria-haspopup='listbox'], button[aria-expanded][data-state]"
+)
+DROPDOWN_TRIGGER_TEXTS = (
+    "more actions",
+    "actions",
+    "options",
+    "more",
+    "plus d'actions",
+    "actions supplémentaires",
+)
+MENU_ITEM_CSS = (
+    "[data-slot='dropdown-menu-item'], [role='menuitem'], "
+    "[role='menuitemradio'], [role='menuitemcheckbox']"
+)
+# Entrées de menu menant à la sélection de créneau
+SLOT_MENU_ITEM_TEXTS = (
+    "continue to slot selection",
+    "slot selection",
+    "select slot",
+    "choose slot",
+    "continue to booking",
+    "book slot",
+    "select date",
+    "choose date",
+    "continuer vers la sélection",
+    "sélection de créneau",
+    "choisir un créneau",
+    "choisir le créneau",
+)
+# Nombre maximal de déclencheurs « More actions » essayés (un par rendez-vous)
+MAX_DROPDOWN_TRIGGERS = _env_int("MAX_DROPDOWN_TRIGGERS", 4, minimum=1, maximum=20)
 
 # Chemins ancrés à l'emplacement du script (indépendants du répertoire
 # depuis lequel le script est lancé)
@@ -1432,6 +1478,175 @@ def is_dangerous_element(element) -> bool:
     return any(word in haystack for word in DANGEROUS_LINK_WORDS)
 
 
+def element_label(element) -> str:
+    """Libellé lisible d'un élément (texte visible, sinon aria-label)."""
+    for getter in (lambda: element.text, lambda: element.get_attribute("aria-label")):
+        try:
+            value = (getter() or "").strip()
+        except Exception:
+            return ""
+        if value:
+            return " ".join(value.split())[:80]
+    return ""
+
+
+def click_element(driver, element) -> bool:
+    """
+    Clique un élément de façon robuste.
+
+    Les menus Radix (comme « More actions » / « Continue to slot selection »)
+    sont rendus dans un portail et peuvent être masqués par un overlay au
+    premier essai : on recule donc du clic natif vers un clic après
+    recentrage, puis vers un clic JavaScript.
+    """
+    try:
+        element.click()
+        return True
+    except Exception as first_error:
+        logger.debug("Clic natif impossible (%s) — recentrage puis nouvel essai.", first_error)
+    try:
+        driver.execute_script(
+            "arguments[0].scrollIntoView({block: 'center', inline: 'center'});", element
+        )
+        time.sleep(0.25)
+        element.click()
+        return True
+    except Exception as second_error:
+        logger.debug("Clic après recentrage impossible (%s) — clic JavaScript.", second_error)
+    try:
+        driver.execute_script("arguments[0].click();", element)
+        return True
+    except Exception as third_error:
+        logger.debug("Clic JavaScript impossible : %s", third_error)
+    return False
+
+
+def press_escape(driver) -> None:
+    """Referme un menu déroulant ouvert (pour essayer le déclencheur suivant)."""
+    try:
+        body = driver.find_elements(By.TAG_NAME, "body")
+        if body:
+            body[0].send_keys(Keys.ESCAPE)
+            time.sleep(0.3)
+    except Exception as e:
+        logger.debug("Fermeture du menu par Échap impossible : %s", e)
+
+
+def find_dropdown_triggers(driver):
+    """Boutons ouvrant un menu déroulant (« More actions », actions, options…)."""
+    triggers = []
+    try:
+        triggers.extend(driver.find_elements(By.CSS_SELECTOR, DROPDOWN_TRIGGER_CSS))
+    except Exception:
+        return []
+
+    # Repli : bouton dont le libellé évoque un menu d'actions
+    if not triggers:
+        try:
+            buttons = driver.find_elements(By.CSS_SELECTOR, "button")
+        except Exception:
+            return []
+        for button in buttons:
+            label = element_label(button).lower()
+            if any(word in label for word in DROPDOWN_TRIGGER_TEXTS):
+                triggers.append(button)
+
+    # Dédupliquer (les sélecteurs peuvent se recouper) en conservant l'ordre
+    unique = []
+    seen = set()
+    for trigger in triggers:
+        try:
+            key = trigger.id
+        except Exception:
+            continue
+        if key not in seen:
+            seen.add(key)
+            unique.append(trigger)
+    return unique
+
+
+def find_slot_menu_item(driver, texts=None):
+    """
+    Cherche dans un menu ouvert l'entrée menant à la sélection de créneau
+    (« Continue to slot selection »). Retourne None si absente.
+    """
+    wanted = tuple(texts or SLOT_MENU_ITEM_TEXTS)
+    try:
+        items = driver.find_elements(By.CSS_SELECTOR, MENU_ITEM_CSS)
+    except Exception:
+        return None
+    for item in items:
+        label = element_label(item).lower()
+        if not label:
+            continue
+        if is_dangerous_element(item):
+            logger.debug("Entrée de menu ignorée (action à risque) : %r", label)
+            continue
+        if any(text in label for text in wanted):
+            return item
+    return None
+
+
+def open_dropdown_and_click_slot_item(driver) -> bool:
+    """
+    Parcours réel vers le calendrier sur /manage-appointments :
+    ouvre le menu « More actions » puis clique « Continue to slot selection ».
+
+    Plusieurs rendez-vous = plusieurs déclencheurs : on les essaie un par un
+    (jusqu'à MAX_DROPDOWN_TRIGGERS) jusqu'à ce que le calendrier s'affiche,
+    en refermant le menu entre deux essais.
+    """
+    triggers = find_dropdown_triggers(driver)
+    if not triggers:
+        logger.debug("Aucun déclencheur de menu déroulant trouvé.")
+        return False
+
+    logger.info(
+        "%d menu(s) « More actions » trouvé(s) — ouverture et recherche de "
+        "« Continue to slot selection »…",
+        len(triggers[:MAX_DROPDOWN_TRIGGERS]),
+    )
+    for index, trigger in enumerate(triggers[:MAX_DROPDOWN_TRIGGERS], start=1):
+        trigger_label = element_label(trigger) or "More actions"
+        if is_dangerous_element(trigger):
+            logger.debug("Déclencheur ignoré (action à risque) : %r", trigger_label)
+            continue
+        if not click_element(driver, trigger):
+            continue
+        sleep_with_jitter(1.2, 0.3)
+
+        item = find_slot_menu_item(driver)
+        if item is None:
+            logger.debug(
+                "Menu %d/%d ouvert (%r) mais aucune entrée de sélection de créneau.",
+                index,
+                len(triggers),
+                trigger_label,
+            )
+            press_escape(driver)
+            continue
+
+        item_label = element_label(item) or "Continue to slot selection"
+        if not click_element(driver, item):
+            press_escape(driver)
+            continue
+        sleep_with_jitter(2.5, 0.5)
+
+        if calendar_is_rendered(driver):
+            logger.info(
+                "Parcours réussi : « %s » → « %s » — calendrier affiché.",
+                trigger_label,
+                item_label,
+            )
+            status.event(f"Calendrier ouvert via « {trigger_label} » → « {item_label} »", "ok")
+            return True
+
+        logger.debug("« %s » cliqué mais pas de calendrier.", item_label)
+        press_escape(driver)
+
+    return False
+
+
 def click_booking_link(driver, extra_texts=None) -> bool:
     """
     Cherche et clique un lien/bouton menant au calendrier des créneaux
@@ -1439,6 +1654,12 @@ def click_booking_link(driver, extra_texts=None) -> bool:
 
     Sert aussi à RETROUVER le calendrier après un rechargement qui a
     réinitialisé l'application React sur sa vue précédente.
+
+    Ordre des tentatives :
+      1. liens/boutons dont le texte est connu,
+      2. liens dont l'URL contient un mot-clé connu,
+      3. entrée de menu déjà ouverte (« Continue to slot selection »),
+      4. ouverture du menu « More actions » puis clic sur cette entrée.
 
     Les éléments dont le texte/l'URL évoque une action destructrice
     (annuler, supprimer, payer, déconnexion) sont systématiquement ignorés.
@@ -1493,6 +1714,22 @@ def click_booking_link(driver, extra_texts=None) -> bool:
                 logger.info("Lien d'URL contenant « %s » cliqué — calendrier affiché.", keyword)
                 status.event(f"Calendrier retrouvé via un lien « {keyword} »", "ok")
                 return True
+
+    # 3. Entrée de menu déjà ouverte (le menu peut être ouvert à l'écran)
+    item = find_slot_menu_item(driver)
+    if item is not None:
+        label = element_label(item) or "entrée de menu"
+        if click_element(driver, item):
+            sleep_with_jitter(2.5, 0.5)
+            if calendar_is_rendered(driver):
+                logger.info("Entrée de menu « %s » cliquée — calendrier affiché.", label)
+                status.event(f"Calendrier retrouvé via l'entrée « {label} »", "ok")
+                return True
+
+    # 4. Parcours réel BLS : ouvrir « More actions » puis
+    #    cliquer « Continue to slot selection »
+    if open_dropdown_and_click_slot_item(driver):
+        return True
 
     return False
 
@@ -1929,10 +2166,12 @@ def calibrate_refresh_mode(driver, appointment_url: str) -> str:
 
     if click_booking_link(driver, extra_texts=BOOKING_STEP_TEXTS):
         logger.info(
-            "Calibrage : le rechargement fait perdre le calendrier, mais un clic "
-            "automatique le retrouve — mode « soft » (rechargements évités)."
+            "Calibrage : le rechargement fait perdre le calendrier, mais le "
+            "parcours de clics le retrouve automatiquement — mode « soft » "
+            "(rechargements évités, resynchronisation toutes les %d vérifications).",
+            SOFT_RESYNC_EVERY,
         )
-        status.event("Mode de rafraîchissement : soft (SPA, calendrier retrouvé par clic)", "warn")
+        status.event("Mode de rafraîchissement : soft (SPA, parcours de clics connu)", "warn")
         status.set(refresh_mode="soft", month_displayed=visible_month_label(driver))
         return "soft"
 
@@ -2282,6 +2521,17 @@ def refresh_until_slot_appears(driver, appointment_url: str, refresh_mode: str =
                 else:
                     wait_before_next_check()
                 continue
+            # En mode soft, le rechargement fait perdre le calendrier :
+            # rejouer tout de suite le parcours de clics qui y mène
+            # (« More actions » → « Continue to slot selection »).
+            if mode == "soft" and not calendar_is_rendered(driver):
+                restored, restored_url = ensure_calendar_visible(
+                    driver, appointment_url, interactive=False
+                )
+                if restored:
+                    appointment_url = restored_url
+                    save_appointment_url(restored_url)
+                    logger.info("Resynchronisation : calendrier réaffiché automatiquement.")
         else:
             soft_refresh_calendar(driver)
 
