@@ -5,18 +5,24 @@ BLS Espagne (Algérie) — Assistant de pré-remplissage (Anti-Détection / Stea
 =============================================================================
 
 MODIFICATIONS INTÉGRÉES :
-- Utilisation de undetected-chromedriver pour contourner la détection WAF/Cloudflare.
+- Utilisation de undetected-chromedriver pour masquer les signaux Selenium (Cloudflare / WAF).
 - Saisie réaliste (frappe humaine avec délais variables).
 - Intervalle de rafraîchissement avec jitter aléatoire.
 - Gestion d'un profil Chrome persistant (conserve cookies et session).
+- Détection immédiate d'un créneau (au rendu du calendrier, sans délai fixe),
+  présélection automatique du premier jour disponible, fenêtre remise au
+  premier plan et alarme sonore. Le choix du créneau horaire et la
+  confirmation de réservation restent volontairement manuels.
 """
 
 import os
+import re
 import sys
 import time
 import random
 import logging
 import platform
+import subprocess
 from datetime import datetime
 
 # Essai d'import de undetected-chromedriver avec fallback sur selenium classique
@@ -38,6 +44,7 @@ from selenium.common.exceptions import (
     NoSuchElementException,
     ElementNotInteractableException,
     ElementClickInterceptedException,
+    SessionNotCreatedException,
 )
 
 try:
@@ -59,6 +66,19 @@ TARGET_MINUTE = int(os.getenv("TARGET_MINUTE", "55"))
 
 # Intervalle de base entre les vérifications (en secondes)
 REFRESH_INTERVAL_SECONDS = float(os.getenv("REFRESH_INTERVAL_SECONDS", "5"))
+
+# Version majeure de Chrome (ex: 151). Vide = détection automatique.
+# Ouvre chrome://version dans Chrome : le premier nombre est la version
+# majeure (ex: 151.0.7922.76 -> 151).
+CHROME_VERSION_MAIN = os.getenv("CHROME_VERSION_MAIN", "").strip()
+
+# Présélection automatique du premier jour disponible dès sa détection :
+# t'affiche directement l'écran des créneaux horaires. Le choix du créneau
+# et la confirmation de réservation restent TOUJOURS manuels.
+# AUTO_CLICK_FIRST_DAY=0 pour désactiver.
+AUTO_CLICK_FIRST_DAY = (
+    os.getenv("AUTO_CLICK_FIRST_DAY", "1").strip().lower() in ("1", "true", "yes", "oui")
+)
 
 AVAILABLE_DAY_CSS = (
     "td[class*='rdp-availability_']"
@@ -116,6 +136,76 @@ def human_type(element, text: str, min_delay: float = 0.04, max_delay: float = 0
         time.sleep(random.uniform(min_delay, max_delay))
 
 
+# ---------- Détection de la version de Chrome installée ----------
+
+def detect_chrome_major_version():
+    """
+    Détecte la version majeure de Chrome installée (best effort).
+
+    undetected-chromedriver, quand on ne lui passe pas `version_main`,
+    télécharge le DERNIER ChromeDriver stable publié — qui ne correspond
+    pas forcément au Chrome réellement installé (ex: driver 153 pour un
+    Chrome 151 -> SessionNotCreatedException). Cette détection permet de
+    lui passer la bonne version majeure.
+    """
+    # 1. Windows : clé de registre maintenue par Chrome lui-même
+    try:
+        import winreg  # uniquement disponible sur Windows
+        for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            try:
+                with winreg.OpenKey(hive, r"Software\Google\Chrome\BLBeacon") as key:
+                    version, _ = winreg.QueryValueEx(key, "version")
+                    return int(str(version).split(".")[0])
+            except OSError:
+                continue
+    except ImportError:
+        pass
+
+    # 2. Windows : dossier "<...>\\Google\\Chrome\\Application\\<version>"
+    app_dirs = [
+        os.path.join(base, "Google", "Chrome", "Application")
+        for base in (
+            os.environ.get("ProgramFiles", ""),
+            os.environ.get("ProgramFiles(x86)", ""),
+            os.environ.get("LocalAppData", ""),
+        )
+        if base
+    ]
+    for app_dir in app_dirs:
+        try:
+            for entry in os.listdir(app_dir):
+                if re.fullmatch(r"\d+(\.\d+){3}", entry):
+                    return int(entry.split(".")[0])
+        except OSError:
+            continue
+
+    # 3. macOS : dossiers de versions du bundle Chrome
+    framework_versions = (
+        "/Applications/Google Chrome.app/Contents/Frameworks/"
+        "Google Chrome Framework.framework/Versions"
+    )
+    try:
+        for entry in os.listdir(framework_versions):
+            if re.fullmatch(r"\d+(\.\d+){3}", entry):
+                return int(entry.split(".")[0])
+    except OSError:
+        pass
+
+    # 4. Linux : interroger directement le binaire
+    for binary in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+        try:
+            result = subprocess.run(
+                [binary, "--version"], capture_output=True, text=True, timeout=10
+            )
+            match = re.search(r"(\d+)\.", result.stdout)
+            if match:
+                return int(match.group(1))
+        except Exception:
+            continue
+
+    return None
+
+
 # ---------- Initialisation du Driver Stealth ----------
 
 def create_driver():
@@ -125,6 +215,32 @@ def create_driver():
 
     if USE_UNDETECTED:
         logger.info("Démarrage via undetected-chromedriver (mode stealth actif)...")
+        # undetected-chromedriver télécharge par défaut le DERNIER
+        # ChromeDriver stable, pas celui qui correspond au Chrome installé
+        # (-> "This version of ChromeDriver only supports Chrome version X").
+        # On lui passe donc la version majeure du Chrome réellement installé.
+        chrome_major = None
+        if CHROME_VERSION_MAIN:
+            try:
+                chrome_major = int(CHROME_VERSION_MAIN)
+                logger.info("Version Chrome forcée via CHROME_VERSION_MAIN : %d", chrome_major)
+            except ValueError:
+                logger.warning(
+                    "CHROME_VERSION_MAIN=%r invalide (entier attendu, ex: 151). "
+                    "Détection automatique utilisée.",
+                    CHROME_VERSION_MAIN,
+                )
+        if chrome_major is None:
+            chrome_major = detect_chrome_major_version()
+            if chrome_major:
+                logger.info("Chrome installé détecté : version majeure %d", chrome_major)
+            else:
+                logger.warning(
+                    "Version de Chrome non détectée : le dernier ChromeDriver stable "
+                    "sera téléchargé. En cas d'erreur de version au lancement, fixe "
+                    "CHROME_VERSION_MAIN dans le .env (ex: CHROME_VERSION_MAIN=151)."
+                )
+
         options = uc.ChromeOptions()
         options.add_argument("--window-size=1920,1080")
         # Chrome n'accepte qu'un seul locale pour --lang (pas de liste séparée
@@ -137,11 +253,29 @@ def create_driver():
         # On utilise le kwarg officiel `user_data_dir` de undetected-chromedriver,
         # ancré au dossier du script.
         os.makedirs(PROFILE_DIR, exist_ok=True)
-        driver = uc.Chrome(
-            options=options,
-            user_data_dir=PROFILE_DIR,
-            use_subprocess=True,
-        )
+        try:
+            driver = uc.Chrome(
+                options=options,
+                user_data_dir=PROFILE_DIR,
+                use_subprocess=True,
+                version_main=chrome_major,
+                # tue d'éventuels processus chromedriver zombies qui
+                # maintiennent un vieux driver en cache
+                patcher_force_close=True,
+            )
+        except SessionNotCreatedException as exc:
+            detail = str(exc).splitlines()[0] if str(exc) else exc
+            raise RuntimeError(
+                f"Échec du lancement de Chrome : {detail}\n"
+                "Cause probable : le ChromeDriver téléchargé ne correspond pas à ta "
+                "version de Chrome.\n"
+                "Solutions :\n"
+                "  1. Ajoute CHROME_VERSION_MAIN=<version majeure> dans le .env "
+                "(ouvre chrome://version dans Chrome ; ex: 151.0.7922.76 -> 151) ;\n"
+                "  2. Ou vide le cache du driver puis relance (PowerShell) :\n"
+                "     Remove-Item \"$env:USERPROFILE\\appdata\\roaming\\undetected_chromedriver\" -Recurse -Force\n"
+                "  3. Ou mets Chrome à jour (menu ⋮ > Aide > À propos de Google Chrome)."
+            ) from exc
     else:
         logger.warning(
             "undetected-chromedriver non installé. Utilisation de Selenium standard "
@@ -190,7 +324,7 @@ def alert_slot_found():
     logger.info("=" * len(banner))
     logger.info(banner)
     logger.info("=" * len(banner))
-    beep_alert(times=6)
+    beep_alert(times=12)
 
 
 def wait_until_target_time():
@@ -335,10 +469,68 @@ def find_available_dates(driver):
         return []
 
 
+def wait_for_calendar_render(driver, timeout: float = 10) -> bool:
+    """
+    Attend que le calendrier (react-day-picker) soit rendu dans la page.
+
+    Bien plus réactif qu'un délai fixe : la présence des cellules du
+    calendrier est vérifiée en continu, donc un créneau est détecté dès
+    qu'il apparaît dans le DOM, pas plusieurs secondes plus tard.
+    """
+    try:
+        WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located(
+                (By.CSS_SELECTOR, "td[class*='rdp-'], [class*='rdp-month']")
+            )
+        )
+        return True
+    except TimeoutException:
+        return False
+
+
+def bring_window_to_front(driver) -> None:
+    """Tente de remettre la fenêtre Chrome au premier plan (best effort)."""
+    try:
+        driver.switch_to.window(driver.current_window_handle)
+        driver.set_window_position(0, 0)
+        driver.maximize_window()
+    except Exception as e:
+        logger.debug("Impossible de remettre la fenêtre au premier plan : %s", e)
+
+
+def preselect_first_available_day(driver, available_days, dates_found) -> None:
+    """
+    Clique sur le premier jour disponible pour afficher directement
+    l'écran des créneaux horaires (navigation seulement — le choix du
+    créneau et la confirmation de réservation restent manuels).
+    """
+    if not AUTO_CLICK_FIRST_DAY:
+        return
+    try:
+        first_day = available_days[0]
+        driver.execute_script(
+            "arguments[0].scrollIntoView({block: 'center'});", first_day
+        )
+        first_day.click()
+        logger.info(
+            "Premier jour disponible présélectionné (%s) — les créneaux horaires "
+            "sont affichés. Choisis ton créneau et confirme : la réservation "
+            "reste manuelle.",
+            dates_found[0],
+        )
+    except Exception as e:
+        logger.warning(
+            "Présélection automatique impossible (%s) — clique sur le jour "
+            "toi-même, il est bien disponible.",
+            e,
+        )
+
+
 def refresh_until_slot_appears(driver, appointment_url: str) -> None:
     logger.info(
         "Surveillance active (intervalle moyen ~%.1fs avec jitter). "
-        "Une alerte sonore sera déclenchée dès qu'un créneau apparaît.",
+        "Dès qu'un créneau apparaît : présélection du jour, fenêtre au "
+        "premier plan et alerte sonore.",
         REFRESH_INTERVAL_SECONDS,
     )
     attempt = 0
@@ -351,11 +543,17 @@ def refresh_until_slot_appears(driver, appointment_url: str) -> None:
             sleep_with_jitter(REFRESH_INTERVAL_SECONDS, 1.5)
             continue
 
-        sleep_with_jitter(REFRESH_INTERVAL_SECONDS, 1.5)
+        # Attend le rendu du calendrier (React) au lieu d'un délai fixe :
+        # un créneau est vérifié dès qu'il apparaît, pas ~5 s plus tard.
+        rendered = wait_for_calendar_render(driver)
+        if not rendered and attempt % 5 == 0:
+            logger.warning(
+                "Calendrier non détecté à la tentative %d — la page charge "
+                "lentement ou le site a changé de structure.",
+                attempt,
+            )
 
         available_days = find_available_dates(driver)
-        page_text = driver.page_source.lower()
-        no_slot_text = any(phrase in page_text for phrase in NO_SLOT_PHRASES)
 
         if attempt % 10 == 0:
             logger.info("Surveillance en cours... (%d vérifications)", attempt)
@@ -363,11 +561,25 @@ def refresh_until_slot_appears(driver, appointment_url: str) -> None:
         if available_days:
             dates_found = [d.get_attribute("data-day") or "Date non précisée" for d in available_days]
             logger.info("Jour(s) disponible(s) détecté(s) : %s", ", ".join(dates_found))
+
+            # Affiche directement l'écran des créneaux horaires :
+            # il ne te restera que le choix du créneau + la confirmation.
+            preselect_first_available_day(driver, available_days, dates_found)
+
+            bring_window_to_front(driver)
             alert_slot_found()
-            logger.info("Le script s'arrête. Réserve immédiatement dans la fenêtre Chrome.")
+            logger.info(
+                "Le script s'arrête là. Choisis ton créneau et clique "
+                "« Réserver » immédiatement dans la fenêtre Chrome."
+            )
             break
-        elif not no_slot_text and page_text.strip():
+
+        page_text = driver.page_source.lower()
+        no_slot_text = any(phrase in page_text for phrase in NO_SLOT_PHRASES)
+        if not no_slot_text and page_text.strip():
             logger.debug("Aucun jour ni message d'indisponibilité explicite.")
+
+        sleep_with_jitter(REFRESH_INTERVAL_SECONDS, 1.5)
 
 
 def main():
