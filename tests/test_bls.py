@@ -1044,11 +1044,84 @@ check("détail de l'erreur publié", "ChromeDriver" in (snap22["state_detail"] o
 check("erreur fatale journalisée", "Erreur fatale" in logs22.text())
 check("invite après erreur fatale", any("fermer l'assistant" in p for p in prompts22), prompts22)
 
+print("\n=== 23. Scénario réel complet : connexion -> liste -> 2 menus -> calendrier -> créneau ===")
+# Reproduit fidèlement la séance décrite par l'utilisateur :
+#   connexion automatique, /manage-appointments (SPA qui retombe sur la liste
+#   à chaque rechargement), DEUX boutons « More actions » (le 1er sans entrée
+#   de créneau, le 2e avec « Continue to slot selection »), entrées dangereuses
+#   dans les deux menus, éléments détachés après chaque ouverture de menu, et
+#   créneau disponible uniquement au mois suivant.
+hub23 = fresh_status()
+logs23 = capture_logs()
+prompts23 = []
+builtins.input = lambda prompt="": (prompts23.append(prompt), "")[1]
+
+real = FakeDriver(page="login", logged_in=False, stale_menus=True,
+                  months_available={"octobre 2026": ["2026-10-07"]})
+real.dropdowns = [
+    {"trigger": "More actions",                      # 1er rendez-vous : pas de créneau
+     "items": ["Cancel Appointment", "View details"], "page": "blank"},
+    {"trigger": "More actions",                      # 2e rendez-vous : le bon
+     "items": ["Cancel Appointment", "Continue to slot selection"],
+     "page": "calendar"},
+]
+
+
+def real_hook(url, driver):
+    if url.endswith("algeria.blsinternational.com/"):
+        driver.page = "account" if driver.logged_in else "login"
+        return
+    # Toute (re)charge de l'URL des créneaux réinitialise la SPA sur la liste
+    driver.page = "list" if driver.logged_in else "login"
+
+
+real.on_get = real_hook
+
+check("23.1 connexion automatique", bls.login(real, interactive=False) is True)
+check("23.2 aucune invite bloquante pendant la connexion", prompts23 == [], prompts23)
+
+url23 = bls.try_auto_navigate(real)
+check("23.3 calendrier atteint automatiquement", bool(url23), url23)
+check("23.4 passé par le 2e menu « More actions »", real.page == "calendar", real.page)
+check("23.5 « Continue to slot selection » cliqué",
+      "Continue to slot selection" in real._clicked_texts, real._clicked_texts)
+check("23.6 « Cancel Appointment » JAMAIS cliqué",
+      "Cancel Appointment" not in real._clicked_texts, real._clicked_texts)
+check("23.7 « View details » non cliqué non plus",
+      "View details" not in real._clicked_texts, real._clicked_texts)
+check("23.8 le 1er menu a été ouvert puis refermé",
+      real.dropdowns[0].get("open") is False, real.dropdowns[0].get("open"))
+check("23.9 échec du 1er menu journalisé",
+      "aucune entrée de sélection de créneau" in logs23.text())
+
+mode23 = bls.calibrate_refresh_mode(real, url23)
+check("23.10 calibrage -> mode soft (SPA)", mode23 == "soft", mode23)
+
+result23 = bls.refresh_until_slot_appears(real, url23, refresh_mode=mode23)
+snap23 = hub23.snapshot()
+check("23.11 créneau trouvé", result23 == "slot", result23)
+check("23.12 créneau du MOIS SUIVANT détecté", snap23["slots_found"] == ["2026-10-07"],
+      snap23["slots_found"])
+check("23.13 mois suivant publié", snap23["state_detail"] == "octobre 2026",
+      snap23["state_detail"])
+check("23.14 jour présélectionné", real._clicked_days == ["2026-10-07"], real._clicked_days)
+check("23.15 état final = CRENEAU_TROUVE", snap23["state"] == "CRENEAU_TROUVE",
+      snap23["state"])
+check("23.16 aucune invite manuelle de toute la séance", prompts23 == [], prompts23)
+check("23.17 aucune relance de Chrome", snap23["recoveries"] == 0, snap23["recoveries"])
+check("23.18 session restée active", snap23["session"] == "active", snap23["session"])
+check("23.19 mode soft publié au tableau de bord", snap23["refresh_mode"] == "soft",
+      snap23["refresh_mode"])
+check("23.20 toujours aucun clic dangereux en fin de séance",
+      "Cancel Appointment" not in real._clicked_texts, real._clicked_texts)
+check("23.21 scan du mois suivant compté", snap23["next_month_scans"] >= 1,
+      snap23["next_month_scans"])
+builtins.input = lambda prompt="": ""
+
 print("\n" + "=" * 66)
 print(f"RESULTAT : {len(PASSED)} verifications OK, {len(FAILED)} en echec")
 for failure in FAILED:
     print("  ECHEC", failure)
 print("=" * 66)
-sys.exit(1 if FAILED else 0)
-
 print(f"Dossier de travail des tests : {WORK_DIR}")
+sys.exit(1 if FAILED else 0)

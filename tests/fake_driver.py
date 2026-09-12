@@ -146,6 +146,7 @@ class FakeDriver:
         self.switch_to = FakeSwitchTo(self)
         self.current_window_handle = "w1"
         self._clicked_days = []
+        self._clicked_texts = []
 
     # ---- Attributs qui lèvent quand la session est morte (comme Selenium) ----
 
@@ -395,6 +396,7 @@ class FakeDriver:
 
     def _menu_item(self, menu, text):
         def action():
+            self._clicked_texts.append(text)
             menu["open"] = False
             self._bump_generation()
             if "slot" in text.lower() or "continue to slot" in text.lower():
@@ -416,6 +418,7 @@ class FakeDriver:
 
     def _link_element(self, link):
         def action():
+            self._clicked_texts.append(link.get("text", ""))
             self.page = link.get("page", "calendar")
             self.current_url = URLS.get(self.page, self.current_url)
             if link.get("logged_in") is not None:
