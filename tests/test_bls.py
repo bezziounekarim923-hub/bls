@@ -839,6 +839,73 @@ check("clic robuste : retombe sur ses pieds", bls.click_element(fake_ctx, stubbo
 check("clic natif retenté après recentrage", len(stubborn.attempts) == 2, stubborn.attempts)
 check("element_label lit le texte", bls.element_label(stubborn) == "Continue to slot selection")
 
+print("\n=== 20b. Éléments détachés (stale) après re-rendu du menu ===")
+# En vrai, ouvrir puis refermer un menu Radix fait re-rendre la liste des
+# rendez-vous : les références récoltées AVANT la boucle deviennent invalides.
+stale_drv = FakeDriver(page="list", logged_in=True, stale_menus=True)
+stale_drv.dropdowns = [
+    # 1er rendez-vous : menu sans entrée de créneau -> on le referme (Échap)
+    {"trigger": "More actions", "items": ["Cancel Appointment", "View details"],
+     "page": "blank"},
+    # 2e rendez-vous : le bon menu
+    {"trigger": "More actions",
+     "items": ["Cancel Appointment", "Continue to slot selection"],
+     "page": "calendar"},
+]
+before20b = bls.find_dropdown_triggers(stale_drv)
+check("deux déclencheurs repérés avant la boucle", len(before20b) == 2, len(before20b))
+check("le parcours aboutit malgré les éléments détachés",
+      bls.open_dropdown_and_click_slot_item(stale_drv) is True)
+check("calendrier affiché via le 2e menu", stale_drv.page == "calendar", stale_drv.page)
+check("l'entrée dangereuse n'a pas été cliquée", stale_drv.page != "blank")
+
+# Sans re-interrogation du DOM, la référence périmée lève immédiatement
+try:
+    before20b[1].click()
+    stale_raised = False
+except Exception as exc:
+    stale_raised = "StaleElementReference" in type(exc).__name__
+check("la vieille référence est bien détachée (le test est réaliste)", stale_raised)
+
+print("\n=== 20c. Clic JavaScript de secours (séquence pointer) ===")
+
+
+class JsOnlyElement:
+    """Refuse tout clic natif ; ne réagit qu'aux événements dispatchés en JS."""
+    id = "js-only-1"
+    text = "Continue to slot selection"
+
+    def __init__(self):
+        self.native_attempts = 0
+        self.js_clicks = 0
+
+    def get_attribute(self, name):
+        return None
+
+    def click(self):
+        self.native_attempts += 1
+        raise Exception("element not interactable")
+
+    def js_click(self):
+        self.js_clicks += 1
+
+    def is_enabled(self):
+        return True
+
+    def is_displayed(self):
+        return True
+
+
+js_only = JsOnlyElement()
+js_ctx = FakeDriver(page="list")
+check("clic de secours : succès via JavaScript", bls.click_element(js_ctx, js_only) is True)
+check("deux clics natifs tentés d'abord", js_only.native_attempts == 2, js_only.native_attempts)
+check("clic JavaScript efectué une fois", js_only.js_clicks == 1, js_only.js_clicks)
+check("la séquence inclut pointerup (exigé par les menus Radix)",
+      "pointerup" in bls.JS_CLICK_SCRIPT and "dispatchEvent" in bls.JS_CLICK_SCRIPT)
+check("la séquence inclut pointerdown et click",
+      "pointerdown" in bls.JS_CLICK_SCRIPT and "'click'" in bls.JS_CLICK_SCRIPT)
+
 print("\n=== 21. Intégration : main() de bout en bout ===")
 import json as _json  # noqa: E402
 import urllib.request  # noqa: E402

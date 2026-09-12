@@ -5,6 +5,7 @@ import re
 from selenium.common.exceptions import (
     InvalidSessionIdException,
     NoSuchElementException,
+    StaleElementReferenceException,
     TimeoutException,
 )
 
@@ -28,23 +29,53 @@ _ELEMENT_SEQ = [0]
 
 
 class FakeElement:
-    def __init__(self, tag="td", attrs=None, text="", on_click=None, enabled=True, on_keys=None):
+    def __init__(self, tag="td", attrs=None, text="", on_click=None, enabled=True,
+                 on_keys=None, driver=None, generation=None):
         _ELEMENT_SEQ[0] += 1
         self.id = f"el-{_ELEMENT_SEQ[0]}"
         self.on_keys = on_keys
         self.tag_name = tag
         self._attrs = attrs or {}
-        self.text = text
+        self._text = text
         self.on_click = on_click
         self.clicks = 0
+        self.js_clicks = 0
         self._enabled = enabled
         self.sent_keys = []
+        # Simulation des re-rendus React/Radix : un élément créé avant le
+        # dernier changement de DOM est « détaché » (stale), comme en vrai.
+        self._driver = driver
+        self._generation = generation
+
+    def _check_stale(self):
+        if (self._driver is not None and self._generation is not None
+                and self._driver._generation != self._generation):
+            raise StaleElementReferenceException(
+                "élément détaché du DOM (re-rendu React/Radix)")
+
+    @property
+    def text(self):
+        self._check_stale()
+        return self._text
+
+    @text.setter
+    def text(self, value):
+        self._text = value
 
     def get_attribute(self, name):
+        self._check_stale()
         return self._attrs.get(name)
 
     def click(self):
+        self._check_stale()
         self.clicks += 1
+        if self.on_click is not None:
+            self.on_click()
+
+    def js_click(self):
+        """Clic déclenché par execute_script (séquence d'événements pointer)."""
+        self._check_stale()
+        self.js_clicks += 1
         if self.on_click is not None:
             self.on_click()
 
@@ -52,6 +83,7 @@ class FakeElement:
         pass
 
     def send_keys(self, *values):
+        self._check_stale()
         self.sent_keys.extend(values)
         if self.on_keys is not None:
             self.on_keys(values)
@@ -78,8 +110,13 @@ class FakeDriver:
     - "blank"    : page sans calendrier
     """
 
-    def __init__(self, page="calendar", months_available=None, logged_in=True, alive=True):
+    def __init__(self, page="calendar", months_available=None, logged_in=True, alive=True,
+                 stale_menus=False):
         self.page = page
+        # stale_menus=True : chaque ouverture/fermeture de menu re-rend la
+        # liste (comme React/Radix en vrai) et détache les éléments précédents.
+        self.stale_menus = stale_menus
+        self._generation = 0
         self.months_available = dict(months_available or {})
         self.month_index = 0
         self.logged_in = logged_in
@@ -175,6 +212,14 @@ class FakeDriver:
         self.script_timeout = value
 
     def execute_script(self, script, *args):
+        # Le clic de secours du script rejoue une séquence d'événements
+        # (pointerdown/pointerup/click) : on la matérialise ici.
+        if args and ("dispatchEvent" in script or "arguments[0].click()" in script):
+            element = args[0]
+            if hasattr(element, "js_click"):
+                element.js_click()
+            elif hasattr(element, "click"):
+                element.click()
         return None
 
     def quit(self):
@@ -265,12 +310,29 @@ class FakeDriver:
         # Échap referme les menus ouverts (send_keys transmet un tuple)
         pressed = "".join(str(key) for key in (keys if isinstance(keys, (tuple, list)) else [keys]))
         if "\ue00c" in pressed:
+            closed = False
             for menu in self.dropdowns:
+                if menu.get("open"):
+                    closed = True
                 menu["open"] = False
+            if closed:
+                self._bump_generation()
+
+    def _bump_generation(self):
+        if self.stale_menus:
+            self._generation += 1
+
+    def _tracked(self, element):
+        """Élément rattaché à la génération courante du DOM (si suivi activé)."""
+        if self.stale_menus:
+            element._driver = self
+            element._generation = self._generation
+        return element
 
     def _dropdown_trigger(self, menu):
         def action():
             menu["open"] = True
+            self._bump_generation()
 
         label = menu.get("trigger", "More actions")
         # radix=False : bouton attrapé par le sélecteur large
@@ -285,22 +347,24 @@ class FakeDriver:
             attributes.update({"data-slot": "dropdown-menu-trigger",
                                "aria-haspopup": "menu"})
 
-        return FakeElement("button", attributes, text=label, on_click=action)
+        return self._tracked(
+            FakeElement("button", attributes, text=label, on_click=action))
 
     def _menu_item(self, menu, text):
         def action():
             menu["open"] = False
+            self._bump_generation()
             if "slot" in text.lower() or "continue to slot" in text.lower():
                 self.page = menu.get("page", "calendar")
                 self.current_url = URLS.get(self.page, self.current_url)
                 self.title = "Prendre rendez-vous"
 
-        return FakeElement(
+        return self._tracked(FakeElement(
             "div",
             {"role": "menuitem", "data-slot": "dropdown-menu-item"},
             text=text,
             on_click=action,
-        )
+        ))
 
     def _link_element(self, link):
         def action():

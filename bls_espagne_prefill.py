@@ -1499,6 +1499,22 @@ def element_label(element) -> str:
     return ""
 
 
+# Clic de secours JavaScript : les entrées de menu Radix
+# (« Continue to slot selection ») écoutent `pointerup` et pas seulement
+# `click`. Un simple `arguments[0].click()` les laisse donc parfois inertes :
+# on rejoue toute la séquence d'événements d'un vrai clic de souris.
+JS_CLICK_SCRIPT = """
+const el = arguments[0];
+el.scrollIntoView({block: 'center', inline: 'center'});
+const opts = {bubbles: true, cancelable: true, view: window, button: 0};
+for (const type of ['pointerover', 'pointerenter', 'pointerdown', 'mousedown',
+                    'pointerup', 'mouseup', 'click']) {
+    const Ctor = type.startsWith('pointer') ? PointerEvent : MouseEvent;
+    el.dispatchEvent(new Ctor(type, opts));
+}
+"""
+
+
 def click_element(driver, element) -> bool:
     """
     Clique un élément de façon robuste.
@@ -1523,7 +1539,7 @@ def click_element(driver, element) -> bool:
     except Exception as second_error:
         logger.debug("Clic après recentrage impossible (%s) — clic JavaScript.", second_error)
     try:
-        driver.execute_script("arguments[0].click();", element)
+        driver.execute_script(JS_CLICK_SCRIPT, element)
         return True
     except Exception as third_error:
         logger.debug("Clic JavaScript impossible : %s", third_error)
@@ -1652,12 +1668,22 @@ def open_dropdown_and_click_slot_item(driver) -> bool:
         logger.debug("Aucun déclencheur de menu déroulant trouvé.")
         return False
 
+    total = min(len(triggers), MAX_DROPDOWN_TRIGGERS)
     logger.info(
         "%d menu(s) « More actions » trouvé(s) — ouverture et recherche de "
         "« Continue to slot selection »…",
-        len(triggers[:MAX_DROPDOWN_TRIGGERS]),
+        total,
     )
-    for index, trigger in enumerate(triggers[:MAX_DROPDOWN_TRIGGERS], start=1):
+    for index in range(1, total + 1):
+        # Ouvrir puis refermer un menu fait re-rendre la liste (React/Radix) :
+        # les références récoltées avant la boucle deviennent « stale » et
+        # lèveraient StaleElementReferenceException. On re-interroge donc le
+        # DOM à CHAQUE essai pour travailler sur des éléments valides.
+        fresh = find_dropdown_triggers(driver)
+        if index > len(fresh):
+            logger.debug("Le menu %d/%d n'existe plus dans le DOM.", index, total)
+            break
+        trigger = fresh[index - 1]
         trigger_label = element_label(trigger) or "More actions"
         if is_dangerous_element(trigger):
             logger.debug("Déclencheur ignoré (action à risque) : %r", trigger_label)
@@ -1671,7 +1697,7 @@ def open_dropdown_and_click_slot_item(driver) -> bool:
             logger.debug(
                 "Menu %d/%d ouvert (%r) mais aucune entrée de sélection de créneau.",
                 index,
-                len(triggers),
+                total,
                 trigger_label,
             )
             press_escape(driver)

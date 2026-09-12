@@ -264,8 +264,12 @@ Le script gère ça tout seul, en trois temps :
    : ils sont essayés un par un (`MAX_DROPDOWN_TRIGGERS`, 4 par défaut), le
    menu étant refermé (Échap) entre deux essais. D'autres libellés sont aussi
    reconnus (« select date », « book appointment », « choisir un créneau »…),
-   et le clic est robuste (clic natif → recentrage → clic JavaScript), les
-   menus Radix étant rendus dans un portail.
+   et le clic est robuste (clic natif → recentrage → séquence d'événements
+   JavaScript), les menus Radix étant rendus dans un portail et leurs entrées
+   réagissant à `pointerup` plutôt qu'à un simple `click()`. La liste des menus
+   est re-interrogée à **chaque** essai : ouvrir puis refermer un menu fait
+   re-rendre la liste, ce qui détache (`stale`) les références récoltées avant
+   la boucle.
 
    Les liens à risque (annuler, supprimer, payer, déconnexion) sont
    **systématiquement ignorés** — y compris **à l'intérieur des menus** :

@@ -6,3 +6,4 @@ class ElementClickInterceptedException(WebDriverException): pass
 class SessionNotCreatedException(WebDriverException): pass
 class InvalidSessionIdException(WebDriverException): pass
 class NoSuchWindowException(WebDriverException): pass
+class StaleElementReferenceException(WebDriverException): pass
