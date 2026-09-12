@@ -399,10 +399,53 @@ def find_login_button(driver):
 
 # ---------- Étapes principales ----------
 
+def page_diagnostics(driver) -> None:
+    """Log titre + taille du HTML + URL pour diagnostiquer une page blanche."""
+    try:
+        logger.warning(
+            "Diagnostic — titre : %r | taille du HTML : %d caractères | URL : %s",
+            (driver.title or "").strip(),
+            len(driver.page_source or ""),
+            driver.current_url,
+        )
+    except Exception as e:
+        logger.warning("Diagnostic impossible : %s", e)
+
+
+def load_login_page(driver) -> None:
+    """Charge la page de connexion, avec rechargement auto si elle sort blanche."""
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        driver.get(BLS_LOGIN_URL)
+        sleep_with_jitter(3.0, 0.8)
+        try:
+            src_len = len((driver.page_source or "").strip())
+        except Exception:
+            src_len = 0
+        title = (driver.title or "").strip()
+        logger.info(
+            "Page de connexion chargée : %s (titre=%r, HTML=%d caractères)",
+            BLS_LOGIN_URL,
+            title,
+            src_len,
+        )
+        if src_len > 500:
+            return  # la page a du contenu, on continue
+        logger.warning(
+            "La page semble blanche/vide (tentative %d/%d) — rechargement...",
+            attempt,
+            max_attempts,
+        )
+    logger.warning(
+        "La page BLS reste blanche après %d essais. Dans la fenêtre Chrome : "
+        "appuie sur F5, ou ouvre la console (F12) pour voir l'erreur. "
+        "Voir README > Dépannage > « Page blanche ».",
+        max_attempts,
+    )
+
+
 def login(driver) -> None:
-    driver.get(BLS_LOGIN_URL)
-    logger.info("Page de connexion chargée : %s", BLS_LOGIN_URL)
-    sleep_with_jitter(3.0, 0.8)
+    load_login_page(driver)
 
     if not BLS_EMAIL or not BLS_PASSWORD:
         logger.warning("BLS_EMAIL / BLS_PASSWORD non définis dans le fichier .env.")
@@ -414,6 +457,7 @@ def login(driver) -> None:
 
     if email_field is None or password_field is None:
         logger.warning("Champs introuvables automatiquement. Remplis le formulaire toi-même.")
+        page_diagnostics(driver)
         input(">>> Appuie sur Entrée une fois connecté manuellement...")
         return
 
@@ -552,6 +596,7 @@ def refresh_until_slot_appears(driver, appointment_url: str) -> None:
                 "lentement ou le site a changé de structure.",
                 attempt,
             )
+            page_diagnostics(driver)
 
         available_days = find_available_dates(driver)
 
