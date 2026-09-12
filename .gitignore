@@ -13,3 +13,8 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+
+# Fichiers d'état créés à l'exécution (aucun secret, mais inutiles dans git)
+appointment_url.txt
+bls_status.json
+.bls_status_*.tmp
