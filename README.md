@@ -331,6 +331,7 @@ blocage.
 | `REFRESH_MODE` | auto | `auto` / `reload` / `soft` (calendrier SPA) |
 | `SOFT_RESYNC_EVERY` | 20 | resynchronisations complètes en mode `soft` |
 | `MAX_DROPDOWN_TRIGGERS` | 4 | menus « More actions » essayés pour retrouver le calendrier |
+| `MAX_BUTTON_FALLBACK` | 60 | boutons examinés en repli si aucun menu n'est détecté |
 | `MAX_MANUAL_PROMPTS` | 2 | invites « réaffiche le calendrier » avant dernier recours |
 | `SCAN_NEXT_MONTH` | 1 | scanner aussi le mois suivant |
 | `NEXT_MONTH_SCAN_EVERY` | 2 | scanner le mois suivant 1 fois sur N |

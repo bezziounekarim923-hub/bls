@@ -1172,6 +1172,120 @@ bls.chain_to_calendar_via_menu = sans_chaine
 check("24.11 sans enchaînement le parcours échoue (le test discrimine)",
       old_chain is False and hop3.page == "list", (old_chain, hop3.page))
 
+print("\n=== 25. URL mémorisée menant à la liste : enchaînement sans fausse alerte ===")
+# Cas nominal sur BLS : l'URL mémorisée est celle de /manage-appointments. Le
+# calendrier ne s'y affiche pas directement -> ce n'est PAS une session
+# expirée ni une page déplacée, c'est le parcours normal en plusieurs sauts.
+hub25 = fresh_status()
+logs25 = capture_logs()
+
+saved_list = FakeDriver(page="list", logged_in=True,
+                        months_available={"septembre 2026": ["2026-09-30"]})
+saved_list.dropdowns = [{"trigger": "More actions",
+                         "items": ["Cancel Appointment", "Continue to slot selection"],
+                         "page": "calendar"}]
+saved_list.on_get = lambda url, driver: setattr(driver, "page", "list")
+
+url25 = bls.try_auto_navigate(saved_list)
+snap25 = hub25.snapshot()
+check("25.1 calendrier atteint depuis l'URL mémorisée", bool(url25), url25)
+check("25.2 page finale = calendrier", saved_list.page == "calendar", saved_list.page)
+check("25.3 enchaînement sur le menu journalisé",
+      "liste des rendez-vous" in logs25.text().lower())
+check("25.4 AUCUNE fausse alerte « session expirée ou page déplacée »",
+      "session expirée ou page déplacée" not in logs25.text())
+check("25.5 aucun événement d'alerte « calendrier non affiché »",
+      not any(e["message"] == "URL mémorisée : calendrier non affiché"
+              for e in snap25["events"]), [e["message"] for e in snap25["events"]])
+check("25.6 événement d'enchaînement publié",
+      any("liste des rendez-vous" in e["message"].lower() for e in snap25["events"]))
+check("25.7 « Cancel Appointment » jamais cliqué",
+      "Cancel Appointment" not in saved_list._clicked_texts, saved_list._clicked_texts)
+check("25.8 URL du calendrier publiée", "appointment" in snap25["current_url"],
+      snap25["current_url"])
+
+# Cas réellement anormal : l'URL mémorisée mène ailleurs (page compte) -> alerte
+logs25b = capture_logs()
+hub25b = fresh_status()
+odd = FakeDriver(page="account", logged_in=True)
+odd.on_get = lambda url, driver: setattr(driver, "page", "account")
+url25b = bls.try_auto_navigate(odd)
+check("25.9 page sans liste ni calendrier -> échec", url25b is None, url25b)
+check("25.10 alerte légitime cette fois",
+      "session expirée ou page déplacée" in logs25b.text())
+# Après le parcours réussi, saved_list est sur le calendrier : plus de liste
+list_sans_menu = FakeDriver(page="list", logged_in=True)      # dropdowns = []
+check("25.11 liste SANS menu d'actions -> False",
+      bls.on_appointment_list(list_sans_menu) is False)
+check("25.12 calendrier atteint -> plus considéré comme la liste",
+      bls.on_appointment_list(saved_list) is False)
+
+list_page = FakeDriver(page="list", logged_in=True)
+list_page.dropdowns = [{"trigger": "More actions",
+                        "items": ["Continue to slot selection"], "page": "calendar"}]
+check("25.13 on_appointment_list vrai sur la liste", bls.on_appointment_list(list_page) is True)
+check("25.14 on_appointment_list faux sur la page compte",
+      bls.on_appointment_list(FakeDriver(page="account", logged_in=True)) is False)
+check("25.15 faux sur une page d'erreur",
+      bls.on_appointment_list(FakeDriver(page="blank", logged_in=True)) is False)
+
+print("\n=== 26. Repli de recherche de menu : bornage du nombre de boutons ===")
+
+
+class StubButton:
+    """Bouton quelconque qui se signale dès qu'on l'examine."""
+
+    def __init__(self, index, touched):
+        self.id = f"btn-{index}"
+        self._index = index
+        self._touched = touched
+
+    def _touch(self):
+        self._touched.add(self._index)
+
+    @property
+    def text(self):
+        self._touch()
+        return f"Bouton {self._index}"
+
+    def get_attribute(self, name):
+        self._touch()
+        return None
+
+    def is_displayed(self):
+        return True
+
+    def is_enabled(self):
+        return True
+
+
+class ManyButtonsDriver:
+    """Page de 300 boutons, aucun sélecteur de menu déroulant reconnu."""
+
+    def __init__(self, count=300):
+        self.touched = set()
+        self.buttons = [StubButton(i, self.touched) for i in range(count)]
+
+    def find_elements(self, by, selector):
+        if "dropdown-menu-trigger" in selector or "aria-haspopup" in selector:
+            return []                      # aucun menu Radix détectable
+        if selector == "button":
+            return self.buttons
+        return []
+
+
+many = ManyButtonsDriver(300)
+found26 = bls.find_dropdown_triggers(many)
+check("26.1 aucun menu retenu sur une page sans menu d'actions", found26 == [], found26)
+check("26.2 repli borné à MAX_BUTTON_FALLBACK boutons",
+      len(many.touched) <= bls.MAX_BUTTON_FALLBACK, len(many.touched))
+check("26.3 bien moins que les 300 boutons de la page",
+      len(many.touched) < 300, len(many.touched))
+check("26.4 la borne est configurable et encadrée",
+      5 <= bls.MAX_BUTTON_FALLBACK <= 400, bls.MAX_BUTTON_FALLBACK)
+check("26.5 les 60 premiers boutons seulement examinés",
+      max(many.touched) < bls.MAX_BUTTON_FALLBACK, max(many.touched))
+
 print("\n" + "=" * 66)
 print(f"RESULTAT : {len(PASSED)} verifications OK, {len(FAILED)} en echec")
 for failure in FAILED:

@@ -392,6 +392,12 @@ SLOT_MENU_ITEM_TEXTS = (
 # Nombre maximal de déclencheurs « More actions » essayés (un par rendez-vous)
 MAX_DROPDOWN_TRIGGERS = _env_int("MAX_DROPDOWN_TRIGGERS", 4, minimum=1, maximum=20)
 
+# Repli de la recherche de menu : nombre maximal de <button> examinés quand
+# aucun sélecteur de menu déroulant ne correspond. Examiner un bouton coûte
+# plusieurs allers-retours WebDriver (data-slot, aria-haspopup, texte,
+# innerHTML) et une page BLS peut en compter des centaines : on borne.
+MAX_BUTTON_FALLBACK = _env_int("MAX_BUTTON_FALLBACK", 60, minimum=5, maximum=400)
+
 # Chemins ancrés à l'emplacement du script (indépendants du répertoire
 # depuis lequel le script est lancé).
 # BLS_STATE_DIR déplace les fichiers d'état (journal, URL mémorisée, état du
@@ -1738,10 +1744,15 @@ def find_dropdown_triggers(driver):
     except Exception:
         candidates = []
 
-    # Repli : bouton dont le libellé évoque un menu d'actions
+    # Repli : bouton dont le libellé évoque un menu d'actions.
+    # Borné volontairement : examiner un bouton coûte plusieurs allers-retours
+    # WebDriver (data-slot, aria-haspopup, texte, innerHTML), et une page BLS
+    # peut en compter des centaines. Les menus d'actions sont en début de DOM.
     if not candidates:
         try:
-            candidates.extend(driver.find_elements(By.CSS_SELECTOR, "button"))
+            candidates.extend(
+                driver.find_elements(By.CSS_SELECTOR, "button")[:MAX_BUTTON_FALLBACK]
+            )
         except Exception:
             return []
 
@@ -1971,6 +1982,16 @@ def click_booking_link(driver, extra_texts=None) -> bool:
     return False
 
 
+def on_appointment_list(driver) -> bool:
+    """
+    Vrai si la page affichée est la LISTE des rendez-vous (/manage-appointments).
+
+    Sur BLS c'est une étape normale du parcours, pas une anomalie : le
+    calendrier y est derrière le menu « More actions ».
+    """
+    return bool(find_dropdown_triggers(driver))
+
+
 def try_auto_navigate(driver):
     """
     Tente d'atteindre le calendrier sans intervention humaine.
@@ -1982,10 +2003,33 @@ def try_auto_navigate(driver):
         if goto_appointment_page(driver, saved):
             status.event("Calendrier atteint via l'URL mémorisée", "ok")
             return saved
-        logger.warning(
-            "L'URL connue n'affiche pas le calendrier (session expirée ou page déplacée)."
-        )
-        status.event("URL mémorisée : calendrier non affiché", "warn")
+
+        # L'URL mémorisée est souvent celle de la LISTE des rendez-vous : le
+        # calendrier ne s'y affiche pas directement, il est derrière le menu.
+        # C'est le parcours nominal sur BLS -> on enchaîne SANS alerter, au
+        # lieu de faire croire à une session expirée ou à une page déplacée.
+        if on_appointment_list(driver):
+            logger.info(
+                "L'URL mémorisée mène à la liste des rendez-vous — "
+                "enchaînement sur le menu « More actions » pour afficher le calendrier."
+            )
+            status.event("URL mémorisée : liste des rendez-vous, enchaînement sur le menu")
+            if open_dropdown_and_click_slot_item(driver):
+                url = current_url(driver) or saved
+                logger.info("Calendrier des créneaux affiché : %s", url)
+                status.event("Calendrier atteint via l'URL mémorisée puis le menu", "ok")
+                status.set(current_url=url, month_displayed=visible_month_label(driver))
+                return url
+            logger.warning(
+                "Liste des rendez-vous atteinte mais le menu « More actions » "
+                "n'a pas mené au calendrier."
+            )
+            status.event("Menu « More actions » sans calendrier", "warn")
+        else:
+            logger.warning(
+                "L'URL connue n'affiche pas le calendrier (session expirée ou page déplacée)."
+            )
+            status.event("URL mémorisée : calendrier non affiché", "warn")
 
     logger.info("Tentative de clic automatique sur le lien de prise de rendez-vous...")
     if click_booking_link(driver):
