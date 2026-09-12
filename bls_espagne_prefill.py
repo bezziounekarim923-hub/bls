@@ -1532,36 +1532,78 @@ def press_escape(driver) -> None:
         logger.debug("Fermeture du menu par Échap impossible : %s", e)
 
 
-def find_dropdown_triggers(driver):
-    """Boutons ouvrant un menu déroulant (« More actions », actions, options…)."""
-    triggers = []
+def looks_like_action_menu_trigger(element) -> bool:
+    """
+    Vrai pour un déclencheur de menu d'actions (« More actions »).
+
+    Filtre important : `aria-expanded` + `data-state` se retrouvent aussi sur
+    des boutons sans rapport (sélecteur de langue, filtre de liste, accordéon)
+    qu'il ne faut surtout pas cliquer à l'aveugle.
+    """
     try:
-        triggers.extend(driver.find_elements(By.CSS_SELECTOR, DROPDOWN_TRIGGER_CSS))
+        slot = (element.get_attribute("data-slot") or "").lower()
+        if "dropdown-menu-trigger" in slot:
+            return True
     except Exception:
-        return []
+        pass
+    try:
+        haspopup = (element.get_attribute("aria-haspopup") or "").lower()
+        if haspopup in ("menu", "true"):
+            return True
+    except Exception:
+        pass
+
+    label = element_label(element).lower()
+    if any(word in label for word in DROPDOWN_TRIGGER_TEXTS):
+        return True
+
+    # Icône « … » (lucide-ellipsis-vertical / more-vertical / kebab)
+    try:
+        html = (element.get_attribute("innerHTML") or "").lower()
+    except Exception:
+        html = ""
+    return any(icon in html for icon in ("ellipsis", "more-vertical", "more-horizontal", "kebab"))
+
+
+def find_dropdown_triggers(driver):
+    """
+    Boutons ouvrant un menu d'actions (« More actions », actions, options…).
+
+    Un bouton qui n'est clairement pas un menu d'actions (sélecteur de
+    langue, filtre…) est écarté, pour ne pas cliquer n'importe quoi.
+    """
+    candidates = []
+    try:
+        candidates.extend(driver.find_elements(By.CSS_SELECTOR, DROPDOWN_TRIGGER_CSS))
+    except Exception:
+        candidates = []
 
     # Repli : bouton dont le libellé évoque un menu d'actions
-    if not triggers:
+    if not candidates:
         try:
-            buttons = driver.find_elements(By.CSS_SELECTOR, "button")
+            candidates.extend(driver.find_elements(By.CSS_SELECTOR, "button"))
         except Exception:
             return []
-        for button in buttons:
-            label = element_label(button).lower()
-            if any(word in label for word in DROPDOWN_TRIGGER_TEXTS):
-                triggers.append(button)
 
-    # Dédupliquer (les sélecteurs peuvent se recouper) en conservant l'ordre
+    # Dédupliquer (les sélecteurs peuvent se recouper) en conservant l'ordre,
+    # puis ne garder que les vrais déclencheurs de menu d'actions
     unique = []
     seen = set()
-    for trigger in triggers:
+    for trigger in candidates:
         try:
             key = trigger.id
         except Exception:
             continue
-        if key not in seen:
-            seen.add(key)
+        if key in seen:
+            continue
+        seen.add(key)
+        if looks_like_action_menu_trigger(trigger):
             unique.append(trigger)
+        else:
+            logger.debug(
+                "Bouton « %s » écarté : pas un menu d'actions.",
+                element_label(trigger) or "?",
+            )
     return unique
 
 
@@ -1655,18 +1697,38 @@ def click_booking_link(driver, extra_texts=None) -> bool:
     Sert aussi à RETROUVER le calendrier après un rechargement qui a
     réinitialisé l'application React sur sa vue précédente.
 
-    Ordre des tentatives :
-      1. liens/boutons dont le texte est connu,
-      2. liens dont l'URL contient un mot-clé connu,
-      3. entrée de menu déjà ouverte (« Continue to slot selection »),
-      4. ouverture du menu « More actions » puis clic sur cette entrée.
+    Ordre des tentatives (du plus fiable/spécifique au plus générique) :
+      1. entrée de menu déjà ouverte (« Continue to slot selection »),
+      2. ouverture du menu « More actions » puis clic sur cette entrée,
+      3. liens/boutons dont le texte est connu,
+      4. liens dont l'URL contient un mot-clé connu.
+
+    Le parcours par menu est testé EN PREMIER : c'est le chemin réel sur BLS,
+    il coûte une requête de sélecteurs au lieu d'une trentaine de recherches
+    XPath par texte, et il évite de cliquer un lien homonyme au hasard.
 
     Les éléments dont le texte/l'URL évoque une action destructrice
     (annuler, supprimer, payer, déconnexion) sont systématiquement ignorés.
     """
     texts = list(BOOKING_LINK_TEXTS) + list(extra_texts or [])
 
-    # 1. Liens/boutons contenant un texte connu
+    # 1. Entrée de menu déjà ouverte (le menu peut être ouvert à l'écran)
+    item = find_slot_menu_item(driver)
+    if item is not None:
+        label = element_label(item) or "entrée de menu"
+        if click_element(driver, item):
+            sleep_with_jitter(2.5, 0.5)
+            if calendar_is_rendered(driver):
+                logger.info("Entrée de menu « %s » cliquée — calendrier affiché.", label)
+                status.event(f"Calendrier retrouvé via l'entrée « {label} »", "ok")
+                return True
+
+    # 2. Parcours réel BLS : ouvrir « More actions » puis
+    #    cliquer « Continue to slot selection »
+    if open_dropdown_and_click_slot_item(driver):
+        return True
+
+    # 3. Liens/boutons contenant un texte connu
     for text in texts:
         xpath = (
             f"//a[contains(translate(., "
@@ -1694,7 +1756,7 @@ def click_booking_link(driver, extra_texts=None) -> bool:
                 return True
             logger.debug("Clic sur « %s » effectué mais pas de calendrier.", text)
 
-    # 2. Liens dont l'URL contient un mot-clé connu
+    # 4. Liens dont l'URL contient un mot-clé connu
     for keyword in BOOKING_HREF_KEYWORDS:
         try:
             links = driver.find_elements(By.CSS_SELECTOR, f"a[href*='{keyword}']")
@@ -1714,22 +1776,6 @@ def click_booking_link(driver, extra_texts=None) -> bool:
                 logger.info("Lien d'URL contenant « %s » cliqué — calendrier affiché.", keyword)
                 status.event(f"Calendrier retrouvé via un lien « {keyword} »", "ok")
                 return True
-
-    # 3. Entrée de menu déjà ouverte (le menu peut être ouvert à l'écran)
-    item = find_slot_menu_item(driver)
-    if item is not None:
-        label = element_label(item) or "entrée de menu"
-        if click_element(driver, item):
-            sleep_with_jitter(2.5, 0.5)
-            if calendar_is_rendered(driver):
-                logger.info("Entrée de menu « %s » cliquée — calendrier affiché.", label)
-                status.event(f"Calendrier retrouvé via l'entrée « {label} »", "ok")
-                return True
-
-    # 4. Parcours réel BLS : ouvrir « More actions » puis
-    #    cliquer « Continue to slot selection »
-    if open_dropdown_and_click_slot_item(driver):
-        return True
 
     return False
 
@@ -2165,6 +2211,14 @@ def calibrate_refresh_mode(driver, appointment_url: str) -> str:
         return "reload"
 
     if click_booking_link(driver, extra_texts=BOOKING_STEP_TEXTS):
+        # Le parcours de clics peut mener à une autre URL (route interne du
+        # calendrier) : la mémoriser pour le prochain lancement.
+        reached_url = current_url(driver)
+        if reached_url and reached_url != appointment_url:
+            logger.info("Calibrage : URL du calendrier découverte : %s", reached_url)
+            save_appointment_url(reached_url)
+            status.set(current_url=reached_url)
+
         logger.info(
             "Calibrage : le rechargement fait perdre le calendrier, mais le "
             "parcours de clics le retrouve automatiquement — mode « soft » "
@@ -2344,7 +2398,16 @@ def refresh_until_slot_appears(driver, appointment_url: str, refresh_mode: str =
 
     Retourne la raison de l'arrêt : "slot" (créneau trouvé).
     """
-    mode = refresh_mode or calibrate_refresh_mode(driver, appointment_url)
+    mode = refresh_mode
+    if mode is None:
+        mode = calibrate_refresh_mode(driver, appointment_url)
+        # Le calibrage a pu découvrir une URL menant directement au calendrier
+        # (parcours « More actions » → créneaux) et la mémoriser sur disque.
+        discovered = load_saved_appointment_url()
+        if discovered and discovered != appointment_url:
+            logger.info("URL du calendrier mise à jour après calibrage : %s", discovered)
+            appointment_url = discovered
+            status.set(current_url=discovered)
 
     logger.info(
         "Surveillance active (intervalle moyen ~%.1fs avec jitter, mode %s). "

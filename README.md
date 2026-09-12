@@ -270,6 +270,15 @@ Le script gère ça tout seul, en trois temps :
    **systématiquement ignorés** — y compris **à l'intérieur des menus** :
    « Cancel Appointment » et « Continue to slot selection » sont dans le même
    menu, et le premier contient aussi le mot « appointment ».
+
+   Le parcours par menu est essayé **en premier** (avant toute recherche de
+   lien par texte) : c'est le chemin réel sur BLS, il coûte une requête de
+   sélecteurs au lieu d'une trentaine de recherches XPath, et il évite de
+   cliquer un lien homonyme au hasard. Les boutons portant `aria-expanded`
+   qui ne sont **pas** des menus d'actions (sélecteur de langue, filtre,
+   accordéon) sont écartés : seuls comptent `data-slot="dropdown-menu-trigger"`,
+   `aria-haspopup="menu"`, un libellé évocateur (« more actions », « actions »,
+   « options »…) ou une icône « … ».
 3. **Invite ciblée** — si rien n'y fait, le script te demande de réafficher le
    calendrier dans Chrome (`MAX_MANUAL_PROMPTS` fois). **Relancer Chrome ne
    ramènerait pas un calendrier perdu par une SPA** : la relance n'est donc
