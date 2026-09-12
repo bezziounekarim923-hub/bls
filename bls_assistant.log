@@ -1,0 +1,41 @@
+2026-09-12 12:43:56,684 [INFO] Préparation du navigateur Chrome...
+2026-09-12 12:43:56,684 [INFO] ====== WebDriver manager ======
+2026-09-12 12:43:58,510 [INFO] Get LATEST chromedriver version for google-chrome
+2026-09-12 12:43:59,165 [INFO] There is no [win64] chromedriver "151.0.7922.138" for browser google-chrome "151.0.7922" in cache
+2026-09-12 12:43:59,936 [INFO] There is no [win64] chromedriver "151.0.7922.138" for browser google-chrome "151.0.7922" in cache
+2026-09-12 12:43:59,936 [INFO] Get LATEST chromedriver version for google-chrome
+2026-09-12 12:44:02,242 [INFO] WebDriver version 151.0.7922.138 selected
+2026-09-12 12:44:02,253 [INFO] Modern chrome version https://storage.googleapis.com/chrome-for-testing-public/151.0.7922.138/win64/chromedriver-win64.zip
+2026-09-12 12:44:02,253 [INFO] About to download new driver from https://storage.googleapis.com/chrome-for-testing-public/151.0.7922.138/win64/chromedriver-win64.zip
+2026-09-12 12:44:02,875 [INFO] Driver downloading response is 200
+2026-09-12 12:44:07,547 [INFO] Driver has been saved in cache [C:\Users\User\.wdm\drivers\chromedriver\win64\151.0.7922.138]
+2026-09-12 12:44:10,095 [INFO] En attente de 16:55...
+2026-09-12 12:47:05,510 [INFO] Arrêt manuel demandé (Ctrl+C).
+2026-09-12 12:47:05,510 [INFO] Script terminé. Le navigateur Chrome reste ouvert pour toi.
+2026-09-12 12:47:36,196 [INFO] Préparation du navigateur Chrome...
+2026-09-12 12:47:36,196 [INFO] ====== WebDriver manager ======
+2026-09-12 12:47:37,060 [INFO] Driver [C:\Users\User\.wdm\drivers\chromedriver\win64\151.0.7922.138\chromedriver-win64/chromedriver.exe] found in cache by browser version
+2026-09-12 12:47:38,314 [INFO] En attente de 16:55...
+2026-09-12 12:49:00,459 [INFO] Arrêt manuel demandé (Ctrl+C).
+2026-09-12 12:49:00,459 [INFO] Script terminé. Le navigateur Chrome reste ouvert pour toi.
+2026-09-12 12:50:27,995 [INFO] Préparation du navigateur Chrome...
+2026-09-12 12:50:27,995 [INFO] ====== WebDriver manager ======
+2026-09-12 12:50:28,731 [INFO] Driver [C:\Users\User\.wdm\drivers\chromedriver\win64\151.0.7922.138\chromedriver-win64/chromedriver.exe] found in cache by browser version
+2026-09-12 12:50:29,904 [INFO] En attente de 16:55...
+2026-09-12 12:50:51,678 [INFO] Arrêt manuel demandé (Ctrl+C).
+2026-09-12 12:50:51,678 [INFO] Script terminé. Le navigateur Chrome reste ouvert pour toi.
+2026-09-12 12:50:54,877 [INFO] Préparation du navigateur Chrome...
+2026-09-12 12:50:54,877 [INFO] ====== WebDriver manager ======
+2026-09-12 12:50:55,774 [INFO] Driver [C:\Users\User\.wdm\drivers\chromedriver\win64\151.0.7922.138\chromedriver-win64/chromedriver.exe] found in cache by browser version
+2026-09-12 12:50:57,105 [INFO] En attente de 16:55...
+2026-09-12 12:51:29,243 [INFO] Arrêt manuel demandé (Ctrl+C).
+2026-09-12 12:51:29,245 [INFO] Script terminé. Le navigateur Chrome reste ouvert pour toi.
+2026-09-12 12:53:51,766 [INFO] Préparation du navigateur Chrome...
+2026-09-12 12:53:51,766 [INFO] ====== WebDriver manager ======
+2026-09-12 12:53:53,132 [INFO] Driver [C:\Users\User\.wdm\drivers\chromedriver\win64\151.0.7922.138\chromedriver-win64/chromedriver.exe] found in cache by browser version
+2026-09-12 12:53:54,758 [INFO] En attente de 12:55...
+2026-09-12 12:55:04,762 [INFO] Heure cible atteinte (12:55), on continue.
+2026-09-12 12:55:05,363 [INFO] Page de connexion chargée : https://algeria.blsinternational.com/
+2026-09-12 12:56:39,947 [WARNING] Impossible de trouver automatiquement le champ 'email'.
+2026-09-12 12:57:25,789 [WARNING] Impossible de trouver automatiquement le champ 'mot de passe'.
+2026-09-12 12:57:25,789 [WARNING] Un ou plusieurs champs n'ont pas été trouvés automatiquement. Remplis le formulaire toi-même dans la fenêtre Chrome.
