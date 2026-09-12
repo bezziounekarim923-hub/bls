@@ -37,6 +37,7 @@ from selenium.common.exceptions import (
     TimeoutException,
     NoSuchElementException,
     ElementNotInteractableException,
+    ElementClickInterceptedException,
 )
 
 try:
@@ -76,7 +77,14 @@ NO_SLOT_PHRASES = [
 ]
 
 LOGIN_BUTTON_TEXTS = ["login", "log in", "se connecter", "connexion", "sign in"]
-LOG_FILE = "bls_assistant.log"
+
+# Chemins ancrés à l'emplacement du script (indépendants du répertoire
+# depuis lequel le script est lancé)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_FILE = os.path.join(SCRIPT_DIR, "bls_assistant.log")
+
+# Profil Chrome persistant (cookies, session, cache) — jamais commité (.gitignore)
+PROFILE_DIR = os.path.join(SCRIPT_DIR, "chrome_profile")
 
 # =====================================================
 
@@ -112,17 +120,28 @@ def human_type(element, text: str, min_delay: float = 0.04, max_delay: float = 0
 
 def create_driver():
     """Crée une instance Chrome configurée pour minimiser les signaux d'automatisation."""
+    # Langues cohérentes entre l'interface Chrome et navigator.languages
+    lang_prefs = {"intl.accept_languages": "fr-FR,fr,en-US,en"}
+
     if USE_UNDETECTED:
         logger.info("Démarrage via undetected-chromedriver (mode stealth actif)...")
         options = uc.ChromeOptions()
         options.add_argument("--window-size=1920,1080")
-        options.add_argument("--lang=fr-FR,fr")
-        
-        # Optionnel : persistance du profil dans un sous-dossier local
-        profile_dir = os.path.join(os.getcwd(), "chrome_profile")
-        options.add_argument(f"--user-data-dir={profile_dir}")
-        
-        driver = uc.Chrome(options=options, use_subprocess=True)
+        # Chrome n'accepte qu'un seul locale pour --lang (pas de liste séparée
+        # par des virgules) ; la liste complète passe par la pref ci-dessous.
+        options.add_argument("--lang=fr-FR")
+        options.add_experimental_option("prefs", lang_prefs)
+
+        # Profil Chrome persistant (cookies/session conservés entre les
+        # exécutions -> moins de challenges anti-bot récurrents).
+        # On utilise le kwarg officiel `user_data_dir` de undetected-chromedriver,
+        # ancré au dossier du script.
+        os.makedirs(PROFILE_DIR, exist_ok=True)
+        driver = uc.Chrome(
+            options=options,
+            user_data_dir=PROFILE_DIR,
+            use_subprocess=True,
+        )
     else:
         logger.warning(
             "undetected-chromedriver non installé. Utilisation de Selenium standard "
@@ -133,10 +152,17 @@ def create_driver():
         options.add_experimental_option("useAutomationExtension", False)
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_argument("--window-size=1920,1080")
-        
+        options.add_argument("--lang=fr-FR")
+        options.add_experimental_option("prefs", lang_prefs)
+
+        # Profil persistant également en mode repli (avec Selenium classique,
+        # on passe l'option Chrome brute)
+        os.makedirs(PROFILE_DIR, exist_ok=True)
+        options.add_argument(f"--user-data-dir={PROFILE_DIR}")
+
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=options)
-    
+
     driver.maximize_window()
     return driver
 
@@ -266,8 +292,8 @@ def login(driver) -> None:
         password_field.clear()
         human_type(password_field, BLS_PASSWORD)
         logger.info("Identifiants saisis avec cadence humaine.")
-    except ElementNotInteractableException:
-        logger.warning("Champs non interactifs. Saisis tes identifiants à la main.")
+    except (ElementNotInteractableException, ElementClickInterceptedException):
+        logger.warning("Champs non interactifs (ou masqués par un bandeau). Saisis tes identifiants à la main.")
         input(">>> Appuie sur Entrée une fois les identifiants saisis...")
 
     logger.info("Si un CAPTCHA/OTP est demandé, résous-le manuellement dans Chrome.")
@@ -279,7 +305,7 @@ def login(driver) -> None:
             sleep_with_jitter(0.3, 0.1)
             login_button.click()
             logger.info("Connexion envoyée.")
-        except ElementNotInteractableException:
+        except (ElementNotInteractableException, ElementClickInterceptedException):
             logger.warning("Clique toi-même sur le bouton de connexion.")
             input(">>> Appuie sur Entrée une fois connecté...")
     else:
