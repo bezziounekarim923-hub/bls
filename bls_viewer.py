@@ -899,7 +899,12 @@ def _demo_cycle(hub: "StatusHub", stop: threading.Event) -> None:
 
 def run_demo(host: str, port: int) -> None:
     """Simule une séance de surveillance pour prévisualiser l'interface."""
-    hub = StatusHub(enabled=True, host=host, port=port, account_email="demo@example.com")
+    # Données simulées : le fichier d'état part dans un dossier temporaire,
+    # pour ne jamais écraser le vrai bls_status.json écrit par le script.
+    demo_dir = tempfile.mkdtemp(prefix="bls-viewer-demo-")
+    hub = StatusHub(enabled=True, host=host, port=port,
+                    status_file=os.path.join(demo_dir, STATUS_FILENAME),
+                    account_email="demo@example.com")
     hub.set(current_url="https://algeria.blsinternational.com/es/fr/appointment")
     url = hub.start()
     if url is None:

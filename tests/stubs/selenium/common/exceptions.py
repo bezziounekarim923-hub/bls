@@ -1,0 +1,8 @@
+class WebDriverException(Exception): pass
+class TimeoutException(WebDriverException): pass
+class NoSuchElementException(WebDriverException): pass
+class ElementNotInteractableException(WebDriverException): pass
+class ElementClickInterceptedException(WebDriverException): pass
+class SessionNotCreatedException(WebDriverException): pass
+class InvalidSessionIdException(WebDriverException): pass
+class NoSuchWindowException(WebDriverException): pass

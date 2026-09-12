@@ -16,6 +16,7 @@ jamais réserver à ta place. **Le clic final « Réserver » reste toujours man
   - [4. Compte à rebours + self-check](#4-compte-à-rebours--self-check)
 - [Rafraîchissement et calendrier SPA](#rafraîchissement-et-calendrier-spa)
 - [Tous les réglages](#tous-les-réglages)
+- [Vérification hors ligne (tests)](#vérification-hors-ligne-tests)
 - [Premier essai : fais-le calmement](#premier-essai-fais-le-calmement-pas-dans-lurgence)
 - [Limites importantes](#limites-importantes)
 - [Dépannage](#dépannage)
@@ -319,7 +320,42 @@ blocage.
 | `FINAL_CHECK_MINUTES` | 2 | contrôle léger à T-2 min |
 | `VIEWER_ENABLED` | 1 | tableau de bord local |
 | `VIEWER_HOST` / `VIEWER_PORT` | 127.0.0.1 / 8765 | adresse du tableau de bord |
+| `BLS_STATE_DIR` | dossier du script | où écrire journal, URL mémorisée et état JSON |
 | `CHROME_VERSION_MAIN` | vide | version majeure de Chrome forcée |
+
+## Vérification hors ligne (tests)
+
+Le dossier `tests/` contient une suite qui rejoue tous les garde-fous **sans
+Chrome, sans réseau et sans compte BLS** :
+
+```bash
+python tests/test_bls.py
+```
+
+Comment ça marche : `tests/stubs/` remplace Selenium, `python-dotenv`,
+`undetected-chromedriver` et `webdriver_manager` (uniquement dans le processus
+de test — ton installation réelle n'est pas touchée), `tests/fake_driver.py`
+simule le navigateur et les pages du site (connexion, liste des rendez-vous,
+menu « More actions », calendrier, mois suivants, session expirée, fenêtre
+fermée…), et le temps est virtualisé : un compte à rebours de 31 minutes se
+déroule en quelques millisecondes, de façon déterministe.
+
+Les fichiers d'état sont détournés vers un dossier temporaire
+(`BLS_STATE_DIR`) : **rien n'est écrit dans le dépôt**.
+
+Ce qui est couvert (198 vérifications) : scan du mois suivant, session
+expirée → reconnexion automatique, auto-relance de Chrome et ses plafonds,
+compte à rebours + self-check T-30 min + contrôle final T-2 min, bornage des
+réglages `.env`, calibrage `reload`/`soft`, mode soft sans rechargement,
+calendrier perdu puis retrouvé, parcours « More actions » → « Continue to slot
+selection » (y compris en cascade sur plusieurs rendez-vous), liens et entrées
+de menu à risque ignorés, boutons `aria-expanded` parasites écartés, clic
+robuste sur élément masqué, navigation manuelle, tableau de bord (état publié,
+journal, aucun secret écrit) et `main()` de bout en bout, y compris son chemin
+d'erreur fatale.
+
+À relancer après toute modification du script : c'est le filet de sécurité qui
+évite de découvrir une régression le jour de l'ouverture des créneaux.
 
 ## Premier essai : fais-le calmement, pas dans l'urgence
 

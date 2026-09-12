@@ -385,18 +385,27 @@ SLOT_MENU_ITEM_TEXTS = (
 MAX_DROPDOWN_TRIGGERS = _env_int("MAX_DROPDOWN_TRIGGERS", 4, minimum=1, maximum=20)
 
 # Chemins ancrés à l'emplacement du script (indépendants du répertoire
-# depuis lequel le script est lancé)
+# depuis lequel le script est lancé).
+# BLS_STATE_DIR déplace les fichiers d'état (journal, URL mémorisée, état du
+# tableau de bord) ailleurs — utile pour la suite de tests hors ligne, ou pour
+# ranger ces fichiers hors du dépôt.
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_FILE = os.path.join(SCRIPT_DIR, "bls_assistant.log")
+STATE_DIR = (os.getenv("BLS_STATE_DIR") or "").strip() or SCRIPT_DIR
+try:
+    os.makedirs(STATE_DIR, exist_ok=True)
+except OSError:
+    STATE_DIR = SCRIPT_DIR
+LOG_FILE = os.path.join(STATE_DIR, "bls_assistant.log")
 
 # Profil Chrome persistant (cookies, session, cache) — jamais commité (.gitignore)
+# Reste volontairement à côté du script : le profil est lié à l'installation.
 PROFILE_DIR = os.path.join(SCRIPT_DIR, "chrome_profile")
 
 # Fichier mémorisant l'URL du calendrier du dernier lancement réussi
-APPOINTMENT_URL_FILE = os.path.join(SCRIPT_DIR, "appointment_url.txt")
+APPOINTMENT_URL_FILE = os.path.join(STATE_DIR, "appointment_url.txt")
 
 # État publié pour le tableau de bord local (bls_viewer.py) — jamais commité
-STATUS_FILE = os.path.join(SCRIPT_DIR, "bls_status.json")
+STATUS_FILE = os.path.join(STATE_DIR, "bls_status.json")
 
 # =====================================================
 
