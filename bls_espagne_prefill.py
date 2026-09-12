@@ -80,6 +80,13 @@ AUTO_CLICK_FIRST_DAY = (
     os.getenv("AUTO_CLICK_FIRST_DAY", "1").strip().lower() in ("1", "true", "yes", "oui")
 )
 
+# URL directe de la page du calendrier des créneaux (OPTIONNEL).
+# Si vide, le script essaie automatiquement, dans cet ordre :
+#   1. l'URL mémorisée au dernier lancement réussi (appointment_url.txt),
+#   2. un clic sur le lien « prendre rendez-vous » après connexion,
+#   3. et te laisse enfin naviguer manuellement (comportement d'origine).
+APPOINTMENT_URL = os.getenv("APPOINTMENT_URL", "").strip()
+
 AVAILABLE_DAY_CSS = (
     "td[class*='rdp-availability_']"
     ":not([data-disabled='true'])"
@@ -98,6 +105,20 @@ NO_SLOT_PHRASES = [
 
 LOGIN_BUTTON_TEXTS = ["login", "log in", "se connecter", "connexion", "sign in"]
 
+# Textes/href recherchés pour trouver le lien « prendre rendez-vous »
+# (sans accents : translate() XPath ne gère pas les caractères accentués)
+BOOKING_LINK_TEXTS = [
+    "prendre rendez-vous",
+    "prendre un rendez-vous",
+    "book appointment",
+    "book an appointment",
+    "schedule an appointment",
+    "faire une demande",
+    "book now",
+    "new appointment",
+]
+BOOKING_HREF_KEYWORDS = ["appointment", "booking", "schedule"]
+
 # Chemins ancrés à l'emplacement du script (indépendants du répertoire
 # depuis lequel le script est lancé)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -105,6 +126,9 @@ LOG_FILE = os.path.join(SCRIPT_DIR, "bls_assistant.log")
 
 # Profil Chrome persistant (cookies, session, cache) — jamais commité (.gitignore)
 PROFILE_DIR = os.path.join(SCRIPT_DIR, "chrome_profile")
+
+# Fichier mémorisant l'URL du calendrier du dernier lancement réussi
+APPOINTMENT_URL_FILE = os.path.join(SCRIPT_DIR, "appointment_url.txt")
 
 # =====================================================
 
@@ -498,11 +522,133 @@ def login(driver) -> None:
 
 
 def navigate_to_appointment_page(driver) -> str:
-    logger.info("Navigue jusqu'à la page des créneaux dans la fenêtre Chrome.")
+    """Secours manuel : tu navigues toi-même jusqu'au calendrier."""
+    logger.info(
+        "Navigation automatique impossible — navigue toi-même dans Chrome "
+        "jusqu'au calendrier des créneaux."
+    )
     input(">>> Appuie sur Entrée une fois arrivé sur le calendrier des créneaux...")
     appointment_url = driver.current_url
     logger.info("URL des créneaux mémorisée : %s", appointment_url)
     return appointment_url
+
+
+# ---------- Navigation automatique vers le calendrier ----------
+
+def calendar_is_rendered(driver) -> bool:
+    """Vrai si le calendrier (react-day-picker) est présent dans la page."""
+    try:
+        return bool(
+            driver.find_elements(
+                By.CSS_SELECTOR, "td[class*='rdp-'], [class*='rdp-month']"
+            )
+        )
+    except Exception:
+        return False
+
+
+def goto_appointment_page(driver, url: str) -> bool:
+    """Charge l'URL des créneaux et vérifie que le calendrier s'affiche."""
+    try:
+        driver.get(url)
+    except Exception as e:
+        logger.warning("Chargement de la page des créneaux impossible (%s).", e)
+        return False
+    if wait_for_calendar_render(driver, timeout=15):
+        logger.info("Calendrier des créneaux affiché : %s", url)
+        return True
+    return False
+
+
+def load_saved_appointment_url():
+    """URL du calendrier : variable .env prioritaire, puis fichier mémorisé."""
+    if APPOINTMENT_URL:
+        return APPOINTMENT_URL
+    try:
+        with open(APPOINTMENT_URL_FILE, encoding="utf-8") as f:
+            url = f.read().strip()
+        return url or None
+    except OSError:
+        return None
+
+
+def save_appointment_url(url: str) -> None:
+    """Mémorise l'URL pour les prochains lancements."""
+    try:
+        with open(APPOINTMENT_URL_FILE, "w", encoding="utf-8") as f:
+            f.write(url)
+    except OSError as e:
+        logger.debug("Impossible de mémoriser l'URL des créneaux : %s", e)
+
+
+def click_booking_link(driver) -> bool:
+    """
+    Cherche et clique un lien/bouton de prise de rendez-vous après la
+    connexion (best effort — le site change souvent de structure).
+    """
+    # 1. Liens/boutons contenant un texte connu
+    for text in BOOKING_LINK_TEXTS:
+        xpath = (
+            f"//a[contains(translate(., "
+            f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{text}')] "
+            f"| //button[contains(translate(., "
+            f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{text}')]"
+        )
+        try:
+            elements = driver.find_elements(By.XPATH, xpath)
+        except Exception:
+            continue
+        for el in elements:
+            try:
+                el.click()
+                sleep_with_jitter(2.5, 0.5)
+                if calendar_is_rendered(driver):
+                    logger.info("Lien « %s » cliqué — calendrier affiché.", text)
+                    return True
+                logger.debug("Clic sur « %s » effectué mais pas de calendrier.", text)
+            except Exception as e:
+                logger.debug("Clic impossible sur « %s » : %s", text, e)
+
+    # 2. Liens dont l'URL contient un mot-clé connu
+    for kw in BOOKING_HREF_KEYWORDS:
+        try:
+            links = driver.find_elements(By.CSS_SELECTOR, f"a[href*='{kw}']")
+        except Exception:
+            continue
+        for el in links:
+            try:
+                el.click()
+                sleep_with_jitter(2.5, 0.5)
+                if calendar_is_rendered(driver):
+                    logger.info("Lien d'URL contenant « %s » cliqué — calendrier affiché.", kw)
+                    return True
+            except Exception as e:
+                logger.debug("Clic impossible sur le lien « %s » : %s", kw, e)
+
+    return False
+
+
+def try_auto_navigate(driver):
+    """
+    Tente d'atteindre le calendrier sans intervention humaine.
+    Retourne l'URL en cas de succès, None sinon (-> secours manuel).
+    """
+    saved = load_saved_appointment_url()
+    if saved:
+        logger.info("Tentative d'accès direct au calendrier (URL connue)...")
+        if goto_appointment_page(driver, saved):
+            return saved
+        logger.warning(
+            "L'URL connue n'affiche pas le calendrier (session expirée ou page déplacée)."
+        )
+
+    logger.info("Tentative de clic automatique sur le lien de prise de rendez-vous...")
+    if click_booking_link(driver):
+        url = driver.current_url
+        logger.info("Page des créneaux atteinte : %s", url)
+        return url
+
+    return None
 
 
 def find_available_dates(driver):
@@ -634,7 +780,14 @@ def main():
     try:
         wait_until_target_time()
         login(driver)
-        appointment_url = navigate_to_appointment_page(driver)
+
+        # Navigation automatique vers le calendrier (URL mémorisée ou clic
+        # sur le lien de prise de rendez-vous), secours manuel sinon.
+        appointment_url = try_auto_navigate(driver)
+        if appointment_url is None:
+            appointment_url = navigate_to_appointment_page(driver)
+        save_appointment_url(appointment_url)
+
         refresh_until_slot_appears(driver, appointment_url)
 
         input(">>> Appuie sur Entrée quand tu as terminé pour fermer l'assistant...")
