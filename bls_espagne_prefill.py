@@ -87,6 +87,19 @@ AUTO_CLICK_FIRST_DAY = (
 #   3. et te laisse enfin naviguer manuellement (comportement d'origine).
 APPOINTMENT_URL = os.getenv("APPOINTMENT_URL", "").strip()
 
+# Scanner aussi le MOIS SUIVANT du calendrier : les créneaux s'ouvrent
+# souvent pour le mois suivant (le mois affiché est déjà saturé).
+# SCAN_NEXT_MONTH=0 pour désactiver.
+SCAN_NEXT_MONTH = (
+    os.getenv("SCAN_NEXT_MONTH", "1").strip().lower() in ("1", "true", "yes", "oui")
+)
+
+# Scan du mois suivant une tentative sur N (limite les requêtes au site)
+NEXT_MONTH_SCAN_EVERY = 2
+
+# Échecs de chargement consécutifs avant relance automatique de Chrome
+MAX_CONSECUTIVE_FAILURES = 5
+
 AVAILABLE_DAY_CSS = (
     "td[class*='rdp-availability_']"
     ":not([data-disabled='true'])"
@@ -356,13 +369,75 @@ def alert_slot_found():
     beep_alert(times=12)
 
 
-def wait_until_target_time():
+def run_preflight_check(driver) -> None:
+    """
+    Vérifie ~30 min avant l'ouverture que tout est prêt : session active,
+    calendrier accessible. Mieux vaut découvrir un problème à T-30 min
+    qu'à l'heure critique.
+    """
+    logger.info("=" * 60)
+    logger.info("SELF-CHECK (T-30 min) — vérification avant l'ouverture des créneaux")
+    try:
+        driver.get(BLS_LOGIN_URL)
+        sleep_with_jitter(2.0, 0.5)
+        if already_logged_in(driver):
+            logger.info("SELF-CHECK : session toujours active ✔")
+        else:
+            logger.warning(
+                "SELF-CHECK : session NON active — connecte-toi maintenant dans "
+                "la fenêtre Chrome (email/mot de passe + CAPTCHA si demandé)."
+            )
+        saved = load_saved_appointment_url()
+        if saved:
+            driver.get(saved)
+            if wait_for_calendar_render(driver, timeout=10):
+                logger.info("SELF-CHECK : calendrier accessible ✔ (%s)", saved)
+            else:
+                logger.warning(
+                    "SELF-CHECK : calendrier non détecté sur l'URL mémorisée — "
+                    "la navigation automatique s'en chargera après la connexion."
+                )
+        else:
+            logger.info(
+                "SELF-CHECK : pas encore d'URL de calendrier mémorisée — le "
+                "script y naviguera automatiquement après la connexion."
+            )
+    except Exception as e:
+        logger.warning(
+            "SELF-CHECK : échec (%s) — vérifie la fenêtre Chrome et relance "
+            "le script si besoin avant l'ouverture.",
+            e,
+        )
+    logger.info("=" * 60)
+
+
+def wait_until_target_time(driver=None):
     logger.info("En attente de %02d:%02d...", TARGET_HOUR, TARGET_MINUTE)
+    preflight_done = False
+    last_countdown_log = None
     while True:
         now = datetime.now()
         if (now.hour, now.minute) >= (TARGET_HOUR, TARGET_MINUTE):
             logger.info("Heure cible atteinte (%02d:%02d), on continue.", now.hour, now.minute)
             break
+
+        target_dt = now.replace(hour=TARGET_HOUR, minute=TARGET_MINUTE, second=0, microsecond=0)
+        remaining = (target_dt - now).total_seconds()
+
+        # Self-check une fois, à ~30 min de l'ouverture
+        if driver is not None and not preflight_done and remaining <= 30 * 60:
+            preflight_done = True
+            run_preflight_check(driver)
+
+        # Compte à rebours toutes les 5 minutes
+        if last_countdown_log is None or (now - last_countdown_log).total_seconds() >= 300:
+            last_countdown_log = now
+            mins = int(remaining // 60)
+            logger.info(
+                "Ouverture des créneaux dans %dh%02d — ne ferme ni Chrome ni ce terminal.",
+                mins // 60,
+                mins % 60,
+            )
         time.sleep(5)
 
 
@@ -441,6 +516,17 @@ def already_logged_in(driver) -> bool:
     except Exception:
         pass
     return False
+
+
+def looks_like_login_page(driver) -> bool:
+    """
+    Vrai si la page affiche un formulaire de connexion — le site a
+    probablement expiré la session pendant la surveillance.
+    """
+    try:
+        return bool(driver.find_elements(By.CSS_SELECTOR, "input[type='password']"))
+    except Exception:
+        return False
 
 
 def page_diagnostics(driver) -> None:
@@ -710,6 +796,83 @@ def wait_for_calendar_render(driver, timeout: float = 10) -> bool:
         return False
 
 
+def find_month_nav_buttons(driver):
+    """
+    Retourne (bouton mois précédent, bouton mois suivant) du calendrier
+    react-day-picker, ou (None, None) s'ils sont introuvables.
+    """
+    try:
+        buttons = driver.find_elements(
+            By.CSS_SELECTOR,
+            "button[class*='rdp-nav'], button[aria-label*='month' i], "
+            "button[aria-label*='mois' i]",
+        )
+    except Exception:
+        return None, None
+
+    prev_btn = next_btn = None
+    for btn in buttons:
+        try:
+            label = (btn.get_attribute("aria-label") or "").lower()
+            cls = (btn.get_attribute("class") or "").lower()
+        except Exception:
+            continue
+        if (
+            "next" in label
+            or "suivant" in label
+            or "nav_button_next" in cls
+            or "chevron_right" in cls
+        ):
+            next_btn = btn
+        elif (
+            "previous" in label
+            or "precedent" in label
+            or "nav_button_previous" in cls
+            or "chevron_left" in cls
+        ):
+            prev_btn = btn
+
+    # Filet de sécurité : react-day-picker affiche [précédent, suivant]
+    if (prev_btn is None or next_btn is None) and len(buttons) == 2:
+        prev_btn, next_btn = buttons[0], buttons[1]
+    return prev_btn, next_btn
+
+
+def scan_next_month(driver):
+    """
+    Clique sur « mois suivant » et vérifie les créneaux.
+
+    Les créneaux s'ouvrent souvent pour le mois suivant (le mois affiché
+    étant déjà saturé). Si des jours y sont disponibles, on RESTE sur le
+    mois suivant (les éléments restent valides pour la présélection) ;
+    sinon on revient au mois courant.
+    """
+    if not SCAN_NEXT_MONTH:
+        return []
+    _, next_btn = find_month_nav_buttons(driver)
+    if next_btn is None:
+        return []
+    try:
+        next_btn.click()
+        sleep_with_jitter(1.2, 0.4)
+        days = find_available_dates(driver)
+        if days:
+            logger.info(
+                "Créneau(x) détecté(s) sur le MOIS SUIVANT : %s",
+                ", ".join(d.get_attribute("data-day") or "?" for d in days),
+            )
+            return days
+        # Rien au mois suivant -> revenir au mois courant
+        prev_btn, _ = find_month_nav_buttons(driver)
+        if prev_btn is None:
+            return []
+        prev_btn.click()
+        sleep_with_jitter(0.8, 0.3)
+    except Exception as e:
+        logger.debug("Scan du mois suivant impossible : %s", e)
+    return []
+
+
 def bring_window_to_front(driver) -> None:
     """Tente de remettre la fenêtre Chrome au premier plan (best effort)."""
     try:
@@ -748,6 +911,29 @@ def preselect_first_available_day(driver, available_days, dates_found) -> None:
         )
 
 
+def recover_driver(old_driver):
+    """
+    Relance Chrome après des échecs consécutifs (crash, fermeture
+    accidentelle). Retourne un nouveau driver repositionné sur le site.
+    """
+    logger.warning("=" * 60)
+    logger.warning("Chrome ne répond plus — RELANCE AUTOMATIQUE en cours...")
+    logger.warning("=" * 60)
+    try:
+        old_driver.quit()
+    except Exception:
+        pass
+    time.sleep(2)
+    driver = create_driver()
+    # Session conservée par le profil -> cette étape est généralement sautée
+    login(driver)
+    url = try_auto_navigate(driver)
+    if url:
+        save_appointment_url(url)
+    logger.info("Chrome relancé — reprise de la surveillance.")
+    return driver
+
+
 def refresh_until_slot_appears(driver, appointment_url: str) -> None:
     logger.info(
         "Surveillance active (intervalle moyen ~%.1fs avec jitter). "
@@ -756,51 +942,97 @@ def refresh_until_slot_appears(driver, appointment_url: str) -> None:
         REFRESH_INTERVAL_SECONDS,
     )
     attempt = 0
+    consecutive_failures = 0
     while True:
         attempt += 1
         try:
             driver.get(appointment_url)
+            consecutive_failures = 0
         except Exception as e:
-            logger.warning("Erreur réseau (%s), nouvel essai...", e)
-            sleep_with_jitter(REFRESH_INTERVAL_SECONDS, 1.5)
+            consecutive_failures += 1
+            logger.warning(
+                "Erreur de chargement (%s) — échec consécutif %d/%d",
+                e,
+                consecutive_failures,
+                MAX_CONSECUTIVE_FAILURES,
+            )
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                driver = recover_driver(driver)
+                consecutive_failures = 0
+            else:
+                sleep_with_jitter(REFRESH_INTERVAL_SECONDS, 1.5)
             continue
 
-        # Attend le rendu du calendrier (React) au lieu d'un délai fixe :
-        # un créneau est vérifié dès qu'il apparaît, pas ~5 s plus tard.
-        rendered = wait_for_calendar_render(driver)
-        if not rendered and attempt % 5 == 0:
+        # Session expirée pendant l'attente ? -> alerte et reconnexion manuelle
+        if looks_like_login_page(driver):
+            logger.warning("=" * 60)
+            logger.warning("SESSION EXPIRÉE — le site t'a déconnecté pendant la surveillance !")
+            logger.warning("Reconnecte-toi dans la fenêtre Chrome, puis reviens ici.")
+            logger.warning("=" * 60)
+            beep_alert(times=3)
+            input(">>> Appuie sur Entrée une fois reconnecté dans Chrome...")
+            continue  # le prochain cycle rechargera l'URL des créneaux
+
+        try:
+            # Attend le rendu du calendrier (React) au lieu d'un délai fixe :
+            # un créneau est vérifié dès qu'il apparaît, pas ~5 s plus tard.
+            rendered = wait_for_calendar_render(driver)
+            if not rendered and attempt % 5 == 0:
+                logger.warning(
+                    "Calendrier non détecté à la tentative %d — la page charge "
+                    "lentement ou le site a changé de structure.",
+                    attempt,
+                )
+                page_diagnostics(driver)
+
+            available_days = find_available_dates(driver)
+
+            # Les créneaux s'ouvrent souvent pour le MOIS SUIVANT :
+            # le vérifier aussi (une tentative sur NEXT_MONTH_SCAN_EVERY).
+            if (
+                not available_days
+                and SCAN_NEXT_MONTH
+                and attempt % NEXT_MONTH_SCAN_EVERY == 0
+            ):
+                available_days = scan_next_month(driver)
+
+            if attempt % 10 == 0:
+                logger.info("Surveillance en cours... (%d vérifications)", attempt)
+
+            if available_days:
+                dates_found = [d.get_attribute("data-day") or "Date non précisée" for d in available_days]
+                logger.info("Jour(s) disponible(s) détecté(s) : %s", ", ".join(dates_found))
+
+                # Affiche directement l'écran des créneaux horaires :
+                # il ne te restera que le choix du créneau + la confirmation.
+                preselect_first_available_day(driver, available_days, dates_found)
+
+                bring_window_to_front(driver)
+                alert_slot_found()
+                logger.info(
+                    "Le script s'arrête là. Choisis ton créneau et clique "
+                    "« Réserver » immédiatement dans la fenêtre Chrome."
+                )
+                break
+
+            page_text = driver.page_source.lower()
+            no_slot_text = any(phrase in page_text for phrase in NO_SLOT_PHRASES)
+            if not no_slot_text and page_text.strip():
+                logger.debug("Aucun jour ni message d'indisponibilité explicite.")
+        except Exception as e:
+            consecutive_failures += 1
             logger.warning(
-                "Calendrier non détecté à la tentative %d — la page charge "
-                "lentement ou le site a changé de structure.",
-                attempt,
+                "Erreur pendant la vérification (%s) — échec consécutif %d/%d",
+                e,
+                consecutive_failures,
+                MAX_CONSECUTIVE_FAILURES,
             )
-            page_diagnostics(driver)
-
-        available_days = find_available_dates(driver)
-
-        if attempt % 10 == 0:
-            logger.info("Surveillance en cours... (%d vérifications)", attempt)
-
-        if available_days:
-            dates_found = [d.get_attribute("data-day") or "Date non précisée" for d in available_days]
-            logger.info("Jour(s) disponible(s) détecté(s) : %s", ", ".join(dates_found))
-
-            # Affiche directement l'écran des créneaux horaires :
-            # il ne te restera que le choix du créneau + la confirmation.
-            preselect_first_available_day(driver, available_days, dates_found)
-
-            bring_window_to_front(driver)
-            alert_slot_found()
-            logger.info(
-                "Le script s'arrête là. Choisis ton créneau et clique "
-                "« Réserver » immédiatement dans la fenêtre Chrome."
-            )
-            break
-
-        page_text = driver.page_source.lower()
-        no_slot_text = any(phrase in page_text for phrase in NO_SLOT_PHRASES)
-        if not no_slot_text and page_text.strip():
-            logger.debug("Aucun jour ni message d'indisponibilité explicite.")
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                driver = recover_driver(driver)
+                consecutive_failures = 0
+            else:
+                sleep_with_jitter(REFRESH_INTERVAL_SECONDS, 1.5)
+            continue
 
         sleep_with_jitter(REFRESH_INTERVAL_SECONDS, 1.5)
 
@@ -810,7 +1042,7 @@ def main():
     driver = create_driver()
 
     try:
-        wait_until_target_time()
+        wait_until_target_time(driver)
         login(driver)
 
         # Navigation automatique vers le calendrier (URL mémorisée ou clic
