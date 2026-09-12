@@ -14,6 +14,7 @@ jamais réserver à ta place. **Le clic final « Réserver » reste toujours man
   - [2. Garde-fou « session expirée »](#2-garde-fou--session-expirée-)
   - [3. Auto-relance de Chrome](#3-auto-relance-de-chrome)
   - [4. Compte à rebours + self-check](#4-compte-à-rebours--self-check)
+- [Rafraîchissement et calendrier SPA](#rafraîchissement-et-calendrier-spa)
 - [Tous les réglages](#tous-les-réglages)
 - [Premier essai : fais-le calmement](#premier-essai-fais-le-calmement-pas-dans-lurgence)
 - [Limites importantes](#limites-importantes)
@@ -85,13 +86,14 @@ Le script va :
 5. Te laisser gérer le CAPTCHA/OTP toi-même si demandé.
 6. Naviguer automatiquement jusqu'à l'écran des créneaux (URL mémorisée au
    lancement précédent, ou clic sur le lien « prendre rendez-vous ») ; à
-   défaut, te laisser naviguer manuellement — le site change souvent de
-   structure, donc c'est plus fiable ainsi.
-7. Rafraîchir automatiquement cette page et, **dès qu'un créneau apparaît**
-   (mois affiché **ou mois suivant**) : vérifier immédiatement (au rendu du
-   calendrier, sans attendre un délai fixe), **présélectionner le premier
-   jour disponible**, remettre la fenêtre Chrome au premier plan et
-   déclencher une **alerte sonore**.
+   défaut, te laisser naviguer manuellement — l'URL n'est mémorisée que si le
+   calendrier est **réellement détecté**.
+7. **Calibrer le rafraîchissement** (rechargement complet ou mode SPA sans
+   rechargement), puis rafraîchir automatiquement cette page et, **dès qu'un
+   créneau apparaît** (mois affiché **ou mois suivant**) : vérifier
+   immédiatement (au rendu du calendrier, sans attendre un délai fixe),
+   **présélectionner le premier jour disponible**, remettre la fenêtre Chrome
+   au premier plan et déclencher une **alerte sonore**.
 8. S'arrêter là — il ne te reste que deux clics : choisir le créneau horaire
    puis « Réserver ».
 
@@ -223,6 +225,45 @@ rend la main au lieu de relancer Chrome en boucle.
   navigateur vivant et session en place, **sans naviguer** pour ne pas
   quitter le calendrier à l'approche de l'ouverture.
 
+## Rafraîchissement et calendrier SPA
+
+Le site BLS est une application React : **le calendrier n'a pas toujours sa
+propre URL**. Depuis `/manage-appointments`, par exemple, il faut cliquer
+jusqu'à afficher le mois — et l'URL ne change pas. Dans ce cas, recharger
+l'URL à chaque vérification **réinitialise l'application sur la vue liste** :
+le calendrier disparaît et le script journalise `Calendrier non détecté` en
+boucle.
+
+Le script gère ça tout seul, en trois temps :
+
+1. **Calibrage** — au démarrage de la surveillance, il recharge une fois la
+   page et observe le résultat :
+   - le calendrier revient → mode **`reload`** (rechargement complet à chaque
+     vérification, comportement classique) ;
+   - le calendrier disparaît → mode **`soft`** : la page n'est plus rechargée
+     tant que le calendrier est affiché. Les disponibilités sont re-demandées
+     par un **aller-retour de mois** (`mois suivant` → `mois précédent`), ce
+     qui force react-day-picker à se re-rendre sans perdre l'état de
+     navigation. Une resynchronisation complète a lieu toutes les
+     `SOFT_RESYNC_EVERY` vérifications (20 par défaut).
+2. **Réparation automatique** — si le calendrier disparaît quand même, le
+   script cherche un lien/bouton pour le réafficher (« book appointment »,
+   « select date », « continuer »…). Les liens à risque (annuler, supprimer,
+   payer, déconnexion) sont **systématiquement ignorés** : « cancel
+   appointment » contient aussi le mot « appointment ».
+3. **Invite ciblée** — si rien n'y fait, le script te demande de réafficher le
+   calendrier dans Chrome (`MAX_MANUAL_PROMPTS` fois). **Relancer Chrome ne
+   ramènerait pas un calendrier perdu par une SPA** : la relance n'est donc
+   utilisée qu'en dernier recours, ou si la page est vraiment vide/cassée.
+
+En mode `soft`, **ne navigue pas dans Chrome** pendant la surveillance (le
+script surveille l'onglet actif) et laisse le mois affiché tel quel.
+
+Tu peux forcer un mode avec `REFRESH_MODE=reload` ou `REFRESH_MODE=soft`, et
+chaque diagnostic journalise le contenu réel de la page (titre, URL, taille du
+HTML, nombre de cellules `rdp-`, boutons/liens visibles) pour identifier le
+blocage.
+
 ## Tous les réglages
 
 | Variable | Défaut | Rôle |
@@ -233,6 +274,9 @@ rend la main au lieu de relancer Chrome en boucle.
 | `REFRESH_INTERVAL_SECONDS` | 5 | intervalle moyen entre vérifications (plancher 2 s) |
 | `AUTO_CLICK_FIRST_DAY` | 1 | présélection du premier jour disponible |
 | `APPOINTMENT_URL` | vide | URL directe du calendrier |
+| `REFRESH_MODE` | auto | `auto` / `reload` / `soft` (calendrier SPA) |
+| `SOFT_RESYNC_EVERY` | 20 | resynchronisations complètes en mode `soft` |
+| `MAX_MANUAL_PROMPTS` | 2 | invites « réaffiche le calendrier » avant dernier recours |
 | `SCAN_NEXT_MONTH` | 1 | scanner aussi le mois suivant |
 | `NEXT_MONTH_SCAN_EVERY` | 2 | scanner le mois suivant 1 fois sur N |
 | `AUTO_RELOGIN_ON_EXPIRY` | 1 | reconnexion automatique si session expirée |
@@ -352,12 +396,22 @@ de relances (`MAX_DRIVER_RECOVERIES`), il sonne et t'attend :
 
 ### Calendrier non détecté
 
-Le script journalise `Calendrier non détecté (n/6)` avec un diagnostic
-(titre, taille du HTML, URL) :
+Le script journalise `Calendrier non détecté (n/6)` avec un diagnostic complet
+(titre, URL, taille du HTML, nombre de cellules `rdp-`, boutons/liens visibles) :
 
-- soit la page charge lentement (le script retente tout seul),
-- soit le site a changé de structure : navigue manuellement jusqu'au
-  calendrier, le script mémorisera la nouvelle URL dans `appointment_url.txt`.
+- **la page charge lentement** → le script retente tout seul ;
+- **le calendrier dépend d'un état de l'application (SPA)** → c'est le cas le
+  plus courant (voir
+  [Rafraîchissement et calendrier SPA](#rafraîchissement-et-calendrier-spa)).
+  Le script passe en mode `soft`, cherche un bouton pour réafficher le
+  calendrier, puis te demande de le faire toi-même si besoin. Vérifie que tu
+  étais bien allé jusqu'à voir **le mois et ses jours** avant d'appuyer sur
+  Entrée lors de la navigation manuelle ;
+- **le site a changé de structure** → lis la liste des boutons/liens visibles
+  dans le journal : si le calendrier passe par un nouveau bouton, son texte
+  peut être ajouté à `BOOKING_LINK_TEXTS` / `BOOKING_STEP_TEXTS` dans le
+  script. Dans tous les cas, navigue manuellement jusqu'au calendrier : la
+  nouvelle URL est mémorisée dans `appointment_url.txt`.
 
 ### Le tableau de bord ne s'affiche pas
 

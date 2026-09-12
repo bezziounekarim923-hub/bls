@@ -183,6 +183,11 @@ MAX_NO_CALENDAR_ATTEMPTS = _env_int("MAX_NO_CALENDAR_ATTEMPTS", 6, minimum=1, ma
 # (évite de relancer Chrome en boucle sur un problème qu'il ne sait pas régler)
 MAX_DRIVER_RECOVERIES = _env_int("MAX_DRIVER_RECOVERIES", 3, minimum=1, maximum=50)
 
+# Invites manuelles (« réaffiche le calendrier dans Chrome ») avant de passer
+# au dernier recours. Utile quand le calendrier dépend d'un état de
+# l'application React : relancer Chrome ne le ferait pas revenir.
+MAX_MANUAL_PROMPTS = _env_int("MAX_MANUAL_PROMPTS", 2, minimum=0, maximum=20)
+
 # Délais maximaux (secondes) : sans eux, un chargement « pendu » bloque le
 # script indéfiniment et l'auto-relance ne se déclenche jamais.
 PAGE_LOAD_TIMEOUT_SECONDS = _env_float("PAGE_LOAD_TIMEOUT_SECONDS", 45.0, minimum=10.0, maximum=300.0)
@@ -194,6 +199,49 @@ CALENDAR_RENDER_TIMEOUT = _env_float("CALENDAR_RENDER_TIMEOUT", 10.0, minimum=2.
 PREFLIGHT_MINUTES = _env_int("PREFLIGHT_MINUTES", 30, minimum=1, maximum=240)
 # Contrôle léger (navigateur vivant, session) à T-<FINAL_CHECK_MINUTES>
 FINAL_CHECK_MINUTES = _env_int("FINAL_CHECK_MINUTES", 2, minimum=0, maximum=30)
+
+# ---- Rafraîchissement de la page (site React / SPA) -----------------------
+# Le calendrier BLS n'a pas toujours sa propre URL : il s'affiche après un
+# clic, dans une application React. Dans ce cas, recharger l'URL à chaque
+# cycle RÉINITIALISE l'application sur la vue précédente et le calendrier
+# disparaît (« Calendrier non détecté » en boucle).
+#   auto   : le script teste un rechargement puis choisit tout seul (recommandé)
+#   reload : rechargement complet à chaque vérification (page avec URL propre)
+#   soft   : jamais de rechargement tant que le calendrier est affiché ; les
+#            disponibilités sont re-demandées par un aller-retour de mois
+REFRESH_MODE = (os.getenv("REFRESH_MODE", "auto").strip().lower() or "auto")
+if REFRESH_MODE not in ("auto", "reload", "soft"):
+    _CONFIG_WARNINGS.append(
+        f"REFRESH_MODE={REFRESH_MODE!r} inconnu (auto, reload ou soft) — « auto » conservé."
+    )
+    REFRESH_MODE = "auto"
+
+# En mode soft, resynchronisation complète (rechargement + re-navigation)
+# toutes les N vérifications. 0 = jamais.
+SOFT_RESYNC_EVERY = _env_int("SOFT_RESYNC_EVERY", 20, minimum=0, maximum=500)
+
+# Mots-clés à ne JAMAIS cliquer lors de la recherche du lien de réservation :
+# un lien « cancel appointment » contient aussi le mot « appointment ».
+DANGEROUS_LINK_WORDS = (
+    "cancel",
+    "delete",
+    "remove",
+    "withdraw",
+    "reject",
+    "decline",
+    "annuler",
+    "supprimer",
+    "resilier",
+    "pay",
+    "payment",
+    "checkout",
+    "invoice",
+    "logout",
+    "log out",
+    "sign out",
+    "deconnexion",
+    "déconnexion",
+)
 
 # ---- Tableau de bord local (bls_viewer.py) -------------------------------
 VIEWER_ENABLED = _env_bool("VIEWER_ENABLED", True)
@@ -271,6 +319,24 @@ BOOKING_LINK_TEXTS = [
     "new appointment",
 ]
 BOOKING_HREF_KEYWORDS = ["appointment", "booking", "schedule", "book", "demande"]
+
+# Textes supplémentaires testés pour retrouver le calendrier après un
+# rechargement (le parcours BLS passe souvent par un bouton d'étape)
+BOOKING_STEP_TEXTS = [
+    "select date",
+    "choose date",
+    "select appointment date",
+    "appointment date",
+    "pick a date",
+    "book",
+    "continue",
+    "next",
+    "suivant",
+    "continuer",
+    "choisir une date",
+    "sélectionner une date",
+    "date de rendez-vous",
+]
 
 # Chemins ancrés à l'emplacement du script (indépendants du répertoire
 # depuis lequel le script est lancé)
@@ -1251,15 +1317,51 @@ def login(driver, interactive: bool = True) -> bool:
 
 
 def navigate_to_appointment_page(driver) -> str:
-    """Secours manuel : tu navigues toi-même jusqu'au calendrier."""
+    """
+    Secours manuel : tu navigues toi-même jusqu'au calendrier.
+
+    L'URL n'est mémorisée que si le calendrier est RÉELLEMENT détecté :
+    sinon le script surveillerait une page (ex: la liste des rendez-vous)
+    où aucun calendrier n'apparaît jamais.
+    """
     logger.info(
         "Navigation automatique impossible — navigue toi-même dans Chrome "
         "jusqu'au calendrier des créneaux."
     )
+    logger.info(
+        "Important : va jusqu'à voir le MOIS avec ses jours (pas seulement la "
+        "liste de tes rendez-vous)."
+    )
     status.event("Navigation manuelle requise — prends la main dans Chrome", "warn")
-    input(">>> Appuie sur Entrée une fois arrivé sur le calendrier des créneaux...")
+
     appointment_url = current_url(driver)
-    logger.info("URL des créneaux mémorisée : %s", appointment_url)
+    for attempt in range(1, 4):
+        input(
+            ">>> Appuie sur Entrée une fois le calendrier des créneaux affiché "
+            f"(essai {attempt}/3)..."
+        )
+        appointment_url = current_url(driver)
+        if calendar_is_rendered(driver):
+            logger.info("Calendrier détecté — URL mémorisée : %s", appointment_url)
+            status.set(current_url=appointment_url, month_displayed=visible_month_label(driver))
+            status.event("Navigation manuelle : calendrier détecté", "ok")
+            return appointment_url
+        logger.warning(
+            "Aucun calendrier détecté sur cette page (titre=%r, URL=%s). "
+            "Clique sur l'élément qui affiche le mois et ses jours, "
+            "puis appuie à nouveau sur Entrée.",
+            safe_title(driver),
+            appointment_url,
+        )
+        calendar_diagnostics(driver)
+        status.event("Navigation manuelle : calendrier toujours absent", "warn")
+
+    logger.warning(
+        "Aucun calendrier détecté après 3 essais — l'URL %s est mémorisée quand "
+        "même. La surveillance démarre et te préviendra si le calendrier "
+        "n'apparaît pas.",
+        appointment_url,
+    )
     status.set(current_url=appointment_url)
     return appointment_url
 
@@ -1306,13 +1408,45 @@ def save_appointment_url(url: str) -> None:
         logger.debug("Impossible de mémoriser l'URL des créneaux : %s", e)
 
 
-def click_booking_link(driver) -> bool:
+def is_dangerous_element(element) -> bool:
     """
-    Cherche et clique un lien/bouton de prise de rendez-vous après la
-    connexion (best effort — le site change souvent de structure).
+    Vrai si un lien/bouton ressemble à une action destructrice (annuler un
+    rendez-vous, supprimer, payer, se déconnecter…).
+
+    Indispensable : la recherche du lien « prendre rendez-vous » se fait par
+    mot-clé, et « cancel appointment » contient aussi le mot « appointment ».
     """
+    try:
+        text = (element.text or "").lower()
+    except Exception:
+        text = ""
+    try:
+        href = (element.get_attribute("href") or "").lower()
+    except Exception:
+        href = ""
+    try:
+        label = (element.get_attribute("aria-label") or "").lower()
+    except Exception:
+        label = ""
+    haystack = f"{text} {href} {label}"
+    return any(word in haystack for word in DANGEROUS_LINK_WORDS)
+
+
+def click_booking_link(driver, extra_texts=None) -> bool:
+    """
+    Cherche et clique un lien/bouton menant au calendrier des créneaux
+    (best effort — le site change souvent de structure).
+
+    Sert aussi à RETROUVER le calendrier après un rechargement qui a
+    réinitialisé l'application React sur sa vue précédente.
+
+    Les éléments dont le texte/l'URL évoque une action destructrice
+    (annuler, supprimer, payer, déconnexion) sont systématiquement ignorés.
+    """
+    texts = list(BOOKING_LINK_TEXTS) + list(extra_texts or [])
+
     # 1. Liens/boutons contenant un texte connu
-    for text in BOOKING_LINK_TEXTS:
+    for text in texts:
         xpath = (
             f"//a[contains(translate(., "
             f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{text}')] "
@@ -1323,32 +1457,42 @@ def click_booking_link(driver) -> bool:
             elements = driver.find_elements(By.XPATH, xpath)
         except Exception:
             continue
-        for el in elements:
+        for element in elements:
+            if is_dangerous_element(element):
+                logger.debug("Lien « %s » ignoré (action à risque).", text)
+                continue
             try:
-                el.click()
-                sleep_with_jitter(2.5, 0.5)
-                if calendar_is_rendered(driver):
-                    logger.info("Lien « %s » cliqué — calendrier affiché.", text)
-                    return True
-                logger.debug("Clic sur « %s » effectué mais pas de calendrier.", text)
+                element.click()
             except Exception as e:
                 logger.debug("Clic impossible sur « %s » : %s", text, e)
+                continue
+            sleep_with_jitter(2.5, 0.5)
+            if calendar_is_rendered(driver):
+                logger.info("Lien « %s » cliqué — calendrier affiché.", text)
+                status.event(f"Calendrier retrouvé via « {text} »", "ok")
+                return True
+            logger.debug("Clic sur « %s » effectué mais pas de calendrier.", text)
 
     # 2. Liens dont l'URL contient un mot-clé connu
-    for kw in BOOKING_HREF_KEYWORDS:
+    for keyword in BOOKING_HREF_KEYWORDS:
         try:
-            links = driver.find_elements(By.CSS_SELECTOR, f"a[href*='{kw}']")
+            links = driver.find_elements(By.CSS_SELECTOR, f"a[href*='{keyword}']")
         except Exception:
             continue
-        for el in links:
+        for element in links:
+            if is_dangerous_element(element):
+                logger.debug("Lien d'URL « %s » ignoré (action à risque).", keyword)
+                continue
             try:
-                el.click()
-                sleep_with_jitter(2.5, 0.5)
-                if calendar_is_rendered(driver):
-                    logger.info("Lien d'URL contenant « %s » cliqué — calendrier affiché.", kw)
-                    return True
+                element.click()
             except Exception as e:
-                logger.debug("Clic impossible sur le lien « %s » : %s", kw, e)
+                logger.debug("Clic impossible sur le lien « %s » : %s", keyword, e)
+                continue
+            sleep_with_jitter(2.5, 0.5)
+            if calendar_is_rendered(driver):
+                logger.info("Lien d'URL contenant « %s » cliqué — calendrier affiché.", keyword)
+                status.event(f"Calendrier retrouvé via un lien « {keyword} »", "ok")
+                return True
 
     return False
 
@@ -1547,27 +1691,34 @@ def find_month_nav_buttons(driver):
     return prev_btn, next_btn
 
 
-def restore_month(driver, expected_label: str, attempts: int = 2) -> bool:
+def restore_month(driver, expected_label: str, attempts: int = 2, use: str = "prev") -> bool:
     """
-    Revenir au mois de départ après un scan du mois suivant.
+    Revenir au mois `expected_label` (après un scan du mois suivant ou un
+    rafraîchissement SPA).
 
-    Indispensable : si on restait bloqué sur le mois suivant, les cycles
-    suivants croiraient scanner le mois courant alors qu'ils regardent
-    déjà le mois d'après (et le bouton « suivant » finirait par mener trop
-    loin). Retourne True si le mois de départ est bien réaffiché.
+    Indispensable : si on restait bloqué sur un autre mois, les cycles
+    suivants croiraient scanner le mois courant alors qu'ils regardent déjà
+    le mois d'après. `use="prev"` clique sur « mois précédent » (retour
+    normal après un « suivant ») ; `use="next"` fait l'inverse. Le sens
+    opposé est essayé en secours si le bouton voulu est inutilisable.
+
+    Retourne True si le mois de départ est bien réaffiché.
     """
     if not expected_label:
         return True
     for _ in range(max(1, attempts)):
         if visible_month_label(driver) == expected_label:
             return True
-        prev_btn, _ = find_month_nav_buttons(driver)
-        if not month_button_usable(prev_btn):
-            return False
+        prev_btn, next_btn = find_month_nav_buttons(driver)
+        button = prev_btn if use == "prev" else next_btn
+        if not month_button_usable(button):
+            button = next_btn if use == "prev" else prev_btn
+            if not month_button_usable(button):
+                return False
         try:
-            prev_btn.click()
+            button.click()
         except Exception as e:
-            logger.debug("Retour au mois courant impossible : %s", e)
+            logger.debug("Retour au mois %r impossible : %s", expected_label, e)
             return False
         sleep_with_jitter(0.7, 0.2)
     return visible_month_label(driver) == expected_label
@@ -1639,6 +1790,205 @@ def scan_next_month(driver):
         status.event(f"Scan du mois suivant impossible ({e})", "warn")
         restore_month(driver, base_label)
     return [], base_label
+
+
+def page_is_blank(driver) -> bool:
+    """Vrai si la page est vide/cassée (et pas seulement dépourvue de calendrier)."""
+    try:
+        source = driver.page_source or ""
+    except Exception:
+        return True
+    return len(source.strip()) < 500
+
+
+def calendar_diagnostics(driver) -> None:
+    """
+    Journalise ce que la page contient réellement quand le calendrier est
+    introuvable.
+
+    Sert à distinguer trois situations très différentes : page vide/cassée,
+    application React revenue sur sa vue précédente (le calendrier n'a pas
+    sa propre URL), ou structure du site changée.
+    """
+    try:
+        logger.warning(
+            "Diagnostic calendrier — titre : %r | URL : %s | HTML : %d caractères",
+            safe_title(driver),
+            current_url(driver),
+            len(driver.page_source or ""),
+        )
+    except Exception as e:
+        logger.warning("Diagnostic calendrier impossible : %s", e)
+        return
+
+    probes = (
+        ("cellules du calendrier (td[class*='rdp-'])", "td[class*='rdp-']"),
+        ("blocs react-day-picker ([class*='rdp-'])", "[class*='rdp-']"),
+        ("jours désactivés ([data-disabled])", "[data-disabled]"),
+        ("calendrier générique ([class*='calendar'])", "[class*='calendar' i]"),
+        ("boutons de navigation de mois", "button[class*='rdp-nav']"),
+        ("champs mot de passe (page de connexion)", "input[type='password']"),
+    )
+    for label, selector in probes:
+        try:
+            count = len(driver.find_elements(By.CSS_SELECTOR, selector))
+        except Exception:
+            count = -1
+        logger.warning("  · %s : %s", label, count)
+
+    try:
+        clickables = driver.find_elements(By.CSS_SELECTOR, "button, a[href]")
+    except Exception:
+        clickables = []
+    labels = []
+    for element in clickables[:40]:
+        try:
+            text = (element.text or "").strip().replace("\n", " ")
+        except Exception:
+            continue
+        if text and len(text) < 60:
+            labels.append(text)
+    if labels:
+        logger.warning(
+            "  · boutons/liens visibles (40 premiers) : %s",
+            " | ".join(list(dict.fromkeys(labels))[:20]),
+        )
+
+
+def soft_refresh_calendar(driver) -> bool:
+    """
+    Rafraîchit les disponibilités SANS recharger la page.
+
+    Sur une application React où le calendrier n'a pas sa propre URL, un
+    `driver.get()` réinitialise l'application et fait disparaître le
+    calendrier. Un aller-retour « mois suivant → mois précédent » force au
+    contraire react-day-picker à se re-rendre et l'application à re-demander
+    les disponibilités, en conservant l'état de navigation.
+
+    Retourne True si le calendrier est toujours affiché après coup.
+    """
+    base_label = visible_month_label(driver)
+    prev_btn, next_btn = find_month_nav_buttons(driver)
+
+    if month_button_usable(next_btn):
+        try:
+            next_btn.click()
+            wait_month_change(driver, base_label, timeout=3.0)
+        except Exception as e:
+            logger.debug("Rafraîchissement SPA : clic « mois suivant » impossible (%s).", e)
+        restore_month(driver, base_label, use="prev")
+    elif month_button_usable(prev_btn):
+        try:
+            prev_btn.click()
+            wait_month_change(driver, base_label, timeout=3.0)
+        except Exception as e:
+            logger.debug("Rafraîchissement SPA : clic « mois précédent » impossible (%s).", e)
+        restore_month(driver, base_label, use="next")
+    else:
+        logger.debug(
+            "Rafraîchissement SPA : aucun bouton de mois utilisable — "
+            "les disponibilités affichées ne peuvent pas être re-demandées."
+        )
+
+    return calendar_is_rendered(driver)
+
+
+def calibrate_refresh_mode(driver, appointment_url: str) -> str:
+    """
+    Détermine si un rechargement complet conserve le calendrier.
+
+    Retourne "reload" (l'URL affiche directement le calendrier : on peut
+    recharger à chaque vérification) ou "soft" (le calendrier dépend d'un
+    état de l'application React : il ne faut PAS recharger, sinon on le
+    perd à chaque cycle).
+    """
+    if REFRESH_MODE != "auto":
+        logger.info("Mode de rafraîchissement forcé via REFRESH_MODE=%s.", REFRESH_MODE)
+        status.set(refresh_mode=REFRESH_MODE)
+        return REFRESH_MODE
+
+    logger.info(
+        "Calibrage du rafraîchissement : test d'un rechargement complet de la page…"
+    )
+    status.event("Calibrage : test d'un rechargement complet")
+
+    if not safe_get(driver, appointment_url):
+        logger.warning(
+            "Calibrage : rechargement impossible — mode « soft » choisi par précaution."
+        )
+        status.set(refresh_mode="soft")
+        return "soft"
+
+    if wait_for_calendar_render(driver, timeout=CALENDAR_RENDER_TIMEOUT):
+        logger.info(
+            "Calibrage : le rechargement complet affiche le calendrier — mode « reload »."
+        )
+        status.event("Mode de rafraîchissement : reload (l'URL affiche le calendrier)", "ok")
+        status.set(refresh_mode="reload", month_displayed=visible_month_label(driver))
+        return "reload"
+
+    if click_booking_link(driver, extra_texts=BOOKING_STEP_TEXTS):
+        logger.info(
+            "Calibrage : le rechargement fait perdre le calendrier, mais un clic "
+            "automatique le retrouve — mode « soft » (rechargements évités)."
+        )
+        status.event("Mode de rafraîchissement : soft (SPA, calendrier retrouvé par clic)", "warn")
+        status.set(refresh_mode="soft", month_displayed=visible_month_label(driver))
+        return "soft"
+
+    logger.warning(
+        "Calibrage : le rechargement fait perdre le calendrier et aucun lien "
+        "automatique ne le retrouve — mode « soft ». Le calendrier va devoir "
+        "être réaffiché manuellement une fois."
+    )
+    calendar_diagnostics(driver)
+    status.event("Mode de rafraîchissement : soft (SPA, calendrier perdu au rechargement)", "warn")
+    status.set(refresh_mode="soft")
+    return "soft"
+
+
+def ensure_calendar_visible(driver, appointment_url: str, interactive: bool = True):
+    """
+    S'assure que le calendrier est affiché avant/après une perturbation.
+
+    Retourne (calendrier_affiché, url_à_surveiller). Essaie d'abord de le
+    retrouver tout seul (liens/boutons de réservation et d'étape), puis —
+    en mode interactif — te demande de le réafficher dans Chrome.
+    """
+    if calendar_is_rendered(driver):
+        return True, current_url(driver) or appointment_url
+
+    logger.info("Calendrier absent — tentative de le retrouver automatiquement…")
+    if click_booking_link(driver, extra_texts=BOOKING_STEP_TEXTS):
+        url = current_url(driver) or appointment_url
+        return True, url
+
+    if not interactive:
+        return False, appointment_url
+
+    logger.warning("=" * 60)
+    logger.warning(
+        "LE CALENDRIER A DISPARU de la page (l'application React est revenue "
+        "sur sa vue précédente)."
+    )
+    logger.warning(
+        "Dans la fenêtre Chrome : clique à nouveau jusqu'à réafficher le "
+        "calendrier des créneaux (le mois avec les jours)."
+    )
+    logger.warning("=" * 60)
+    status.event("Calendrier perdu : navigation manuelle requise", "warn")
+    beep_alert(times=3)
+    input(">>> Appuie sur Entrée une fois le calendrier réaffiché dans Chrome…")
+
+    if calendar_is_rendered(driver):
+        url = current_url(driver) or appointment_url
+        logger.info("Calendrier réaffiché — surveillance reprise.")
+        status.event("Calendrier réaffiché manuellement — reprise", "ok")
+        return True, url
+
+    logger.warning("Toujours aucun calendrier détecté.")
+    calendar_diagnostics(driver)
+    return False, appointment_url
 
 
 def bring_window_to_front(driver) -> None:
@@ -1743,18 +2093,26 @@ def recover_driver(old_driver, appointment_url=None, reason: str = ""):
     return driver, url
 
 
-def refresh_until_slot_appears(driver, appointment_url: str) -> str:
+def refresh_until_slot_appears(driver, appointment_url: str, refresh_mode: str = None) -> str:
     """
-    Boucle de surveillance : recharge la page des créneaux, détecte un jour
+    Boucle de surveillance : rafraîchit la page des créneaux, détecte un jour
     disponible (mois courant ET mois suivant), le présélectionne et alerte.
 
-    Retourne la raison de l'arrêt : "slot" (créneau trouvé) ou "manuel".
+    `refresh_mode` : "reload" (rechargement complet à chaque vérification),
+    "soft" (aucun rechargement tant que le calendrier est affiché — nécessaire
+    quand le calendrier dépend d'un état de l'application React) ou None pour
+    laisser le script calibrer tout seul.
+
+    Retourne la raison de l'arrêt : "slot" (créneau trouvé).
     """
+    mode = refresh_mode or calibrate_refresh_mode(driver, appointment_url)
+
     logger.info(
-        "Surveillance active (intervalle moyen ~%.1fs avec jitter). "
+        "Surveillance active (intervalle moyen ~%.1fs avec jitter, mode %s). "
         "Dès qu'un créneau apparaît : présélection du jour, fenêtre au "
         "premier plan et alerte sonore.",
         REFRESH_INTERVAL_SECONDS,
+        mode,
     )
     logger.info(
         "Garde-fous actifs : session expirée (reconnexion auto %s), "
@@ -1766,12 +2124,20 @@ def refresh_until_slot_appears(driver, appointment_url: str) -> str:
         MAX_DRIVER_RECOVERIES,
         NEXT_MONTH_SCAN_EVERY,
     )
+    if mode == "soft":
+        logger.info(
+            "Mode « soft » : la page n'est PAS rechargée tant que le calendrier "
+            "est affiché (les disponibilités sont re-demandées par un "
+            "aller-retour de mois). Ne navigue pas dans Chrome pendant la "
+            "surveillance."
+        )
     status.set(
         state="SURVEILLANCE",
-        state_detail=f"intervalle ~{REFRESH_INTERVAL_SECONDS:.0f} s",
+        state_detail=f"intervalle ~{REFRESH_INTERVAL_SECONDS:.0f} s · mode {mode}",
         current_url=appointment_url,
+        refresh_mode=mode,
     )
-    status.event("Surveillance active")
+    status.event(f"Surveillance active (mode {mode})")
 
     counters = {
         "attempt": 0,
@@ -1779,6 +2145,7 @@ def refresh_until_slot_appears(driver, appointment_url: str) -> str:
         "no_calendar": 0,
         "recoveries": 0,
         "expiries": 0,
+        "manual_prompts": 0,
     }
 
     def wait_before_next_check() -> None:
@@ -1800,7 +2167,7 @@ def refresh_until_slot_appears(driver, appointment_url: str) -> str:
 
     def trigger_recovery(reason: str) -> None:
         """Relance Chrome, avec plafond : au-delà, on te rend la main."""
-        nonlocal driver, appointment_url
+        nonlocal driver, appointment_url, mode
         counters["recoveries"] += 1
         counters["failures"] = 0
         counters["no_calendar"] = 0
@@ -1835,13 +2202,15 @@ def refresh_until_slot_appears(driver, appointment_url: str) -> str:
         if url:
             appointment_url = url
             status.set(current_url=url)
+        # Un nouveau Chrome repart de zéro : recalibrer le rafraîchissement
+        mode = calibrate_refresh_mode(driver, appointment_url)
 
     def handle_expired_session() -> None:
         """
         Garde-fou « session expirée » : reconnexion automatique d'abord,
         alerte sonore + intervention manuelle ensuite (CAPTCHA/OTP).
         """
-        nonlocal appointment_url
+        nonlocal appointment_url, mode
         counters["expiries"] += 1
         logger.warning("=" * 60)
         logger.warning("SESSION EXPIRÉE — le site t'a déconnecté pendant la surveillance !")
@@ -1849,20 +2218,27 @@ def refresh_until_slot_appears(driver, appointment_url: str) -> str:
         status.set(state="SESSION_EXPIREE", session="expirée")
         status.event(f"Session expirée (n°{counters['expiries']})", "warn")
 
+        def resume() -> None:
+            nonlocal appointment_url, mode
+            url = try_auto_navigate(driver) or appointment_url
+            if url:
+                save_appointment_url(url)
+                appointment_url = url
+            mode = calibrate_refresh_mode(driver, appointment_url)
+            counters["no_calendar"] = 0
+            counters["expiries"] = 0
+            status.set(session="active", state="SURVEILLANCE",
+                       state_detail=f"intervalle ~{REFRESH_INTERVAL_SECONDS:.0f} s · mode {mode}")
+
         if AUTO_RELOGIN_ON_EXPIRY and BLS_EMAIL and BLS_PASSWORD:
             logger.info("Tentative de reconnexion automatique avec les identifiants du .env…")
             status.set(state="RECONNEXION", state_detail="automatique")
             if login(driver, interactive=False):
                 status.incr("relogins")
-                status.set(session="active", state="SURVEILLANCE", state_detail="")
                 logger.info("Reconnexion automatique réussie — surveillance reprise.")
                 status.event("Reconnexion automatique réussie ✔", "ok")
                 beep_alert(times=2)
-                counters["expiries"] = 0
-                url = try_auto_navigate(driver) or appointment_url
-                if url:
-                    save_appointment_url(url)
-                    appointment_url = url
+                resume()
                 return
             logger.warning(
                 "Reconnexion automatique échouée (CAPTCHA, OTP ou site lent)."
@@ -1873,12 +2249,7 @@ def refresh_until_slot_appears(driver, appointment_url: str) -> str:
         logger.warning("Reconnecte-toi dans la fenêtre Chrome, puis reviens ici.")
         status.set(state="RECONNEXION", state_detail="manuelle")
         input(">>> Appuie sur Entrée une fois reconnecté dans Chrome…")
-        url = try_auto_navigate(driver) or appointment_url
-        if url:
-            save_appointment_url(url)
-            appointment_url = url
-        status.set(session="active", state="SURVEILLANCE", state_detail="")
-        counters["expiries"] = 0
+        resume()
 
     while True:
         counters["attempt"] += 1
@@ -1891,15 +2262,28 @@ def refresh_until_slot_appears(driver, appointment_url: str) -> str:
             trigger_recovery("navigateur ne répond plus")
             continue
 
-        if not safe_get(driver, appointment_url):
-            note_failure("Erreur de chargement de la page des créneaux")
-            if counters["failures"] >= MAX_CONSECUTIVE_FAILURES:
-                trigger_recovery(
-                    f"{MAX_CONSECUTIVE_FAILURES} échecs de chargement consécutifs"
-                )
-            else:
-                wait_before_next_check()
-            continue
+        # --- Rafraîchissement : rechargement complet OU rafraîchissement SPA ---
+        must_reload = (
+            mode == "reload"
+            or not calendar_is_rendered(driver)
+            or bool(SOFT_RESYNC_EVERY)
+            and attempt % SOFT_RESYNC_EVERY == 0
+        )
+        if must_reload:
+            if mode == "soft" and attempt > 1:
+                logger.info("Resynchronisation complète (rechargement + re-navigation)…")
+                status.event("Resynchronisation complète (SPA)")
+            if not safe_get(driver, appointment_url):
+                note_failure("Erreur de chargement de la page des créneaux")
+                if counters["failures"] >= MAX_CONSECUTIVE_FAILURES:
+                    trigger_recovery(
+                        f"{MAX_CONSECUTIVE_FAILURES} échecs de chargement consécutifs"
+                    )
+                else:
+                    wait_before_next_check()
+                continue
+        else:
+            soft_refresh_calendar(driver)
 
         counters["failures"] = 0
         status.set(
@@ -1916,7 +2300,9 @@ def refresh_until_slot_appears(driver, appointment_url: str) -> str:
         try:
             # Attend le rendu du calendrier (React) au lieu d'un délai fixe :
             # un créneau est vérifié dès qu'il apparaît, pas ~5 s plus tard.
-            rendered = wait_for_calendar_render(driver)
+            rendered = wait_for_calendar_render(
+                driver, timeout=3.0 if not must_reload else None
+            )
             if not rendered:
                 # Garde-fou session expirée — 2e passage : la redirection vers
                 # la page de connexion arrive parfois APRÈS le rendu initial.
@@ -1925,24 +2311,69 @@ def refresh_until_slot_appears(driver, appointment_url: str) -> str:
                     continue
 
                 counters["no_calendar"] += 1
+                logger.warning(
+                    "Calendrier non détecté (%d/%d) — la page charge lentement, "
+                    "l'application est revenue sur sa vue précédente, ou le site "
+                    "a changé de structure.",
+                    counters["no_calendar"],
+                    MAX_NO_CALENDAR_ATTEMPTS,
+                )
                 status.event(
                     f"Calendrier non détecté ({counters['no_calendar']}/{MAX_NO_CALENDAR_ATTEMPTS})",
                     "warn",
                 )
-                logger.warning(
-                    "Calendrier non détecté (%d/%d) — la page charge lentement "
-                    "ou le site a changé de structure.",
-                    counters["no_calendar"],
-                    MAX_NO_CALENDAR_ATTEMPTS,
+                if counters["no_calendar"] == 1 or counters["no_calendar"] % 3 == 0:
+                    calendar_diagnostics(driver)
+
+                # 1) Essayer de retrouver le calendrier sans te déranger
+                recovered_calendar, url = ensure_calendar_visible(
+                    driver, appointment_url, interactive=False
                 )
-                if counters["no_calendar"] % 3 == 0 or counters["no_calendar"] >= MAX_NO_CALENDAR_ATTEMPTS:
-                    page_diagnostics(driver)
+                if recovered_calendar:
+                    logger.info("Calendrier retrouvé automatiquement — surveillance reprise.")
+                    status.event("Calendrier retrouvé automatiquement", "ok")
+                    appointment_url = url
+                    save_appointment_url(url)
+                    counters["no_calendar"] = 0
+                    continue
+
+                # 2) Au-delà du seuil : page vide -> relance Chrome ;
+                #    sinon c'est un état SPA -> on te demande de réafficher le calendrier
                 if counters["no_calendar"] >= MAX_NO_CALENDAR_ATTEMPTS:
-                    trigger_recovery(
-                        f"calendrier introuvable {MAX_NO_CALENDAR_ATTEMPTS} fois de suite"
-                    )
-                else:
-                    wait_before_next_check()
+                    if page_is_blank(driver):
+                        trigger_recovery("page vide/cassée et calendrier introuvable")
+                        continue
+
+                    counters["manual_prompts"] += 1
+                    if counters["manual_prompts"] <= MAX_MANUAL_PROMPTS:
+                        logger.warning(
+                            "Le calendrier ne revient pas tout seul (%d/%d) — "
+                            "relance de Chrome inutile ici, c'est l'état de "
+                            "l'application qu'il faut restaurer.",
+                            counters["manual_prompts"],
+                            MAX_MANUAL_PROMPTS,
+                        )
+                        recovered_calendar, url = ensure_calendar_visible(
+                            driver, appointment_url, interactive=True
+                        )
+                        if recovered_calendar:
+                            appointment_url = url
+                            save_appointment_url(url)
+                            counters["no_calendar"] = 0
+                            mode = calibrate_refresh_mode(driver, appointment_url)
+                            continue
+                    else:
+                        logger.error(
+                            "Calendrier introuvable et %d invites manuelles sans "
+                            "succès — dernier recours : relance complète de Chrome.",
+                            MAX_MANUAL_PROMPTS,
+                        )
+                        trigger_recovery(
+                            f"calendrier introuvable {MAX_NO_CALENDAR_ATTEMPTS} fois "
+                            "et navigation manuelle sans effet"
+                        )
+                        continue
+                wait_before_next_check()
                 continue
 
             counters["no_calendar"] = 0
@@ -1965,8 +2396,9 @@ def refresh_until_slot_appears(driver, appointment_url: str) -> str:
 
             if attempt % 10 == 0:
                 logger.info(
-                    "Surveillance en cours… (%d vérifications, mois affiché : %s)",
+                    "Surveillance en cours… (%d vérifications, mode %s, mois affiché : %s)",
                     attempt,
+                    mode,
                     month_label or "inconnu",
                 )
 
@@ -2007,7 +2439,6 @@ def refresh_until_slot_appears(driver, appointment_url: str) -> str:
             continue
 
         wait_before_next_check()
-
 
 def main():
     viewer_url = status.start()

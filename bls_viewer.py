@@ -162,6 +162,7 @@ class StatusHub:
             "session": "inconnue",
             "account": mask_email(account_email),
             "current_url": "",
+            "refresh_mode": "",
             "month_displayed": "",
             "month_scanned": "",
             "checks": 0,
@@ -507,6 +508,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <dl class="kv">
       <dt>Session</dt><dd id="session">inconnue</dd>
       <dt>Compte</dt><dd id="account">—</dd>
+      <dt>Rafraîchissement</dt><dd id="refreshMode">—</dd>
       <dt>Self-check</dt><dd id="preflight">non effectué</dd>
       <dt>Page</dt><dd id="url">—</dd>
     </dl>
@@ -625,6 +627,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     text("target", d.target_time ? "Cible : " + d.target_time : "Heure cible non définie");
     text("session", d.session || "inconnue");
     text("account", d.account || "—");
+    text("refreshMode", d.refresh_mode
+      ? (d.refresh_mode === "soft" ? "soft (SPA, sans rechargement)" : "reload (page rechargée)")
+      : "—");
     text("url", d.current_url || "—");
     text("monthDisplayed", d.month_displayed || "—");
     text("monthScanned", d.month_scanned || "—");
@@ -781,6 +786,7 @@ def _demo_cycle(hub: "StatusHub", stop: threading.Event) -> None:
         next_month_scans=0,
         month_displayed="",
         month_scanned="",
+        refresh_mode="",
         last_check_at=None,
         preflight={"done": False, "session_ok": None, "calendar_ok": None, "message": ""},
         state_detail="",
@@ -838,10 +844,12 @@ def _demo_cycle(hub: "StatusHub", stop: threading.Event) -> None:
         state="SURVEILLANCE",
         state_detail="intervalle ~5 s",
         seconds_remaining=0,
+        refresh_mode="soft",
         month_displayed="septembre 2026",
         current_url="https://algeria.blsinternational.com/es/fr/appointment",
     )
     hub.event("Heure cible atteinte (16:55), on continue.", "ok")
+    hub.event("Calibrage : le rechargement fait perdre le calendrier — mode « soft »", "warn")
     hub.event("Surveillance active (intervalle moyen ~5,0 s avec jitter).")
 
     while not stop.is_set():
