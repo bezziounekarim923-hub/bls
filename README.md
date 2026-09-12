@@ -252,11 +252,19 @@ Le script gère ça tout seul, en trois temps :
    connu et codé en dur :
 
    ```
-   /manage-appointments
-     └─ bouton « More actions »   (data-slot="dropdown-menu-trigger", aria-haspopup="menu")
-          └─ « Continue to slot selection »   (div role="menuitem", data-slot="dropdown-menu-item")
-               └─ calendrier des créneaux
+   page compte (après connexion)
+     └─ lien « Manage Appointments »
+          └─ /manage-appointments  (liste des rendez-vous — PAS encore le calendrier)
+               └─ bouton « More actions »   (data-slot="dropdown-menu-trigger", aria-haspopup="menu")
+                    └─ « Continue to slot selection »   (div role="menuitem", data-slot="dropdown-menu-item")
+                         └─ calendrier des créneaux
    ```
+
+   Le parcours comporte donc **plusieurs sauts successifs**, et chaque saut
+   intermédiaire ressemble à un échec pris isolément (aucun calendrier après le
+   clic). Le script **enchaîne** automatiquement : un clic qui mène à la liste
+   des rendez-vous déclenche aussitôt l'ouverture du menu « More actions », au
+   lieu d'abandonner et de te rendre la main.
 
    L'entrée de menu est un `<div role="menuitem">` qui **n'existe dans le DOM
    qu'une fois le menu ouvert** : le script ouvre donc d'abord le menu, puis

@@ -1118,6 +1118,60 @@ check("23.21 scan du mois suivant compté", snap23["next_month_scans"] >= 1,
       snap23["next_month_scans"])
 builtins.input = lambda prompt="": ""
 
+print("\n=== 24. Chaîne complète : page compte -> liste -> menu -> calendrier ===")
+# Après connexion, le script est sur la page COMPTE. Le calendrier est à trois
+# sauts : lien « Manage Appointments » -> liste -> « More actions » ->
+# « Continue to slot selection ». Chaque saut intermédiaire ressemble à un
+# échec (aucun calendrier) : sans enchaînement, le script rendait la main.
+hub24 = fresh_status()
+logs24 = capture_logs()
+
+hop = FakeDriver(page="account", logged_in=True,
+                 months_available={"septembre 2026": ["2026-09-29"]})
+hop.links = [{"text": "Manage Appointments", "href": "/es/fr/manage-appointments",
+              "page": "list"}]
+hop.dropdowns = [{"trigger": "More actions",
+                  "items": ["Cancel Appointment", "Continue to slot selection"],
+                  "page": "calendar"}]
+
+check("24.1 aucun menu sur la page compte", bls.find_dropdown_triggers(hop) == [])
+check("24.2 chaînage réussi jusqu'au calendrier", bls.click_booking_link(hop) is True)
+check("24.3 calendrier affiché au bout de la chaîne", hop.page == "calendar", hop.page)
+check("24.4 lien « Manage Appointments » cliqué",
+      "Manage Appointments" in hop._clicked_texts, hop._clicked_texts)
+check("24.5 entrée de menu cliquée ensuite",
+      "Continue to slot selection" in hop._clicked_texts, hop._clicked_texts)
+check("24.6 « Cancel Appointment » jamais cliqué",
+      "Cancel Appointment" not in hop._clicked_texts, hop._clicked_texts)
+check("24.7 enchaînement journalisé",
+      "Liste des rendez-vous atteinte" in logs24.text())
+
+# try_auto_navigate() doit aboutir seul, sans invite manuelle
+hop2 = FakeDriver(page="account", logged_in=True)
+hop2.links = [{"text": "Manage Appointments", "href": "/es/fr/manage-appointments",
+               "page": "list"}]
+hop2.dropdowns = [{"trigger": "More actions",
+                   "items": ["Cancel Appointment", "Continue to slot selection"],
+                   "page": "calendar"}]
+url24 = bls.try_auto_navigate(hop2)
+check("24.8 navigation automatique de bout en bout", bool(url24), url24)
+check("24.9 URL du calendrier renvoyée", "appointment" in (url24 or ""), url24)
+check("24.10 calendrier atteint sans intervention", hop2.page == "calendar", hop2.page)
+
+# Contrôle négatif : sans l'enchaînement, la chaîne s'arrête à la liste
+sans_chaine = bls.chain_to_calendar_via_menu
+bls.chain_to_calendar_via_menu = lambda driver: False
+hop3 = FakeDriver(page="account", logged_in=True)
+hop3.links = [{"text": "Manage Appointments", "href": "/es/fr/manage-appointments",
+               "page": "list"}]
+hop3.dropdowns = [{"trigger": "More actions",
+                   "items": ["Cancel Appointment", "Continue to slot selection"],
+                   "page": "calendar"}]
+old_chain = bls.click_booking_link(hop3)
+bls.chain_to_calendar_via_menu = sans_chaine
+check("24.11 sans enchaînement le parcours échoue (le test discrimine)",
+      old_chain is False and hop3.page == "list", (old_chain, hop3.page))
+
 print("\n" + "=" * 66)
 print(f"RESULTAT : {len(PASSED)} verifications OK, {len(FAILED)} en echec")
 for failure in FAILED:

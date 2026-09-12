@@ -311,10 +311,11 @@ class FakeDriver:
 
         # --- menus déroulants Radix ---
         if "dropdown-menu-trigger" in sel or "aria-haspopup" in sel:
-            # Une page d'erreur n'affiche plus la liste des rendez-vous : ses
-            # boutons « More actions » ont disparu du DOM (comme en vrai, où
-            # cliquer un doublon masqué peut faire quitter la page).
-            if self.page == "blank":
+            # Les boutons « More actions » n'existent QUE sur la liste des
+            # rendez-vous (/manage-appointments). Ni sur la page compte, ni sur
+            # le calendrier, ni sur une page d'erreur — comme sur le vrai site,
+            # où le parcours compte -> liste -> menu est obligatoire.
+            if self.page != "list":
                 return []
             return [self._dropdown_trigger(menu) for menu in self.dropdowns]
         if "dropdown-menu-item" in sel or "menuitem" in sel:

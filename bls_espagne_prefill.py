@@ -317,6 +317,14 @@ BOOKING_LINK_TEXTS = [
     "faire une demande",
     "book now",
     "new appointment",
+    # Page intermédiaire sur BLS : la LISTE des rendez-vous, d'où le
+    # calendrier est derrière « More actions » -> « Continue to slot selection »
+    "manage appointment",
+    "manage appointments",
+    "my appointments",
+    "mes rendez-vous",
+    "gérer mes rendez-vous",
+    "voir mes rendez-vous",
 ]
 BOOKING_HREF_KEYWORDS = ["appointment", "booking", "schedule", "book", "demande"]
 
@@ -1692,6 +1700,31 @@ def calendar_after_click(driver, handles_before) -> bool:
     return False
 
 
+def chain_to_calendar_via_menu(driver) -> bool:
+    """
+    Enchaîne sur le menu « More actions » quand un clic vient de mener à la
+    LISTE des rendez-vous plutôt qu'au calendrier.
+
+    Le parcours réel BLS comporte plusieurs sauts successifs :
+        page compte -> /manage-appointments (liste) -> « More actions »
+        -> « Continue to slot selection » -> calendrier
+
+    Pris isolément, chaque saut intermédiaire ressemble à un échec (pas de
+    calendrier après le clic) : sans cet enchaînement, le script s'arrêtait là
+    et rendait la main pour une navigation manuelle inutile.
+    """
+    if calendar_is_rendered(driver):
+        return True
+    if not find_dropdown_triggers(driver):
+        return False
+    logger.info(
+        "Liste des rendez-vous atteinte — enchaînement sur le menu "
+        "« More actions » pour afficher le calendrier…"
+    )
+    status.event("Liste des rendez-vous atteinte : ouverture du menu", "ok")
+    return open_dropdown_and_click_slot_item(driver)
+
+
 def find_dropdown_triggers(driver):
     """
     Boutons ouvrant un menu d'actions (« More actions », actions, options…).
@@ -1899,6 +1932,12 @@ def click_booking_link(driver, extra_texts=None) -> bool:
                 logger.info("Lien « %s » cliqué — calendrier affiché.", text)
                 status.event(f"Calendrier retrouvé via « {text} »", "ok")
                 return True
+            # Ce lien menait peut-être à la LISTE des rendez-vous : le
+            # calendrier y est derrière le menu « More actions ».
+            if chain_to_calendar_via_menu(driver):
+                logger.info("Lien « %s » puis menu « More actions » — calendrier affiché.", text)
+                status.event(f"Calendrier retrouvé via « {text} » puis le menu", "ok")
+                return True
             logger.debug("Clic sur « %s » effectué mais pas de calendrier.", text)
 
     # 4. Liens dont l'URL contient un mot-clé connu
@@ -1918,6 +1957,15 @@ def click_booking_link(driver, extra_texts=None) -> bool:
             if calendar_after_click(driver, handles_before):
                 logger.info("Lien d'URL contenant « %s » cliqué — calendrier affiché.", keyword)
                 status.event(f"Calendrier retrouvé via un lien « {keyword} »", "ok")
+                return True
+            # Même enchaînement : ce lien mène peut-être à la liste des
+            # rendez-vous, d'où le calendrier est derrière « More actions ».
+            if chain_to_calendar_via_menu(driver):
+                logger.info(
+                    "Lien d'URL « %s » puis menu « More actions » — calendrier affiché.",
+                    keyword,
+                )
+                status.event(f"Calendrier retrouvé via « {keyword} » puis le menu", "ok")
                 return True
 
     return False
