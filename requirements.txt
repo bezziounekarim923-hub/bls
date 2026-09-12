@@ -1,0 +1,13 @@
+# Mode stealth recommandé : masque navigator.webdriver, patche le binaire
+# ChromeDriver (variables $cdc_...) et supprime la bannière d'automatisation.
+undetected-chromedriver>=3.5.5
+
+# Selenium (utilisé par undetected-chromedriver, et en mode repli si uc
+# n'est pas installé)
+selenium>=4.15.0,<5.0
+
+# Gestion du ChromeDriver en mode repli (Selenium classique)
+webdriver-manager>=4.0.1
+
+# Chargement du fichier .env
+python-dotenv>=1.0.0

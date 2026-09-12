@@ -6,11 +6,23 @@ jamais réserver à ta place. **Le clic final "Réserver" reste toujours manuel.
 ## Installation
 
 ```bash
-pip install selenium webdriver-manager python-dotenv
+pip install -r requirements.txt
 ```
 
-Il te faut aussi Google Chrome installé sur ton ordinateur (le driver est géré
-automatiquement par `webdriver-manager`).
+Il te faut aussi Google Chrome installé sur ton ordinateur.
+
+Le script démarre par défaut via **undetected-chromedriver** (mode discret :
+pas de drapeau `navigator.webdriver`, pas de variables `$cdc_...`, pas de
+bannière « Chrome est contrôlé par un logiciel de test automatisé »), et
+saisit les identifiants avec une cadence de frappe humaine. Si le paquet
+n'est pas installé, il bascule automatiquement sur Selenium classique avec
+les options anti-détection de base — moins discret.
+
+Au premier lancement, un dossier `chrome_profile/` est créé à côté du
+script : il conserve tes cookies et ta session entre deux exécutions, ce
+qui limite les challenges anti-bot récurrents. Ne le supprime pas entre
+deux sessions de surveillance. Il n'est jamais commité (exclu via
+`.gitignore`).
 
 ## Configuration
 
@@ -22,7 +34,9 @@ automatiquement par `webdriver-manager`).
 3. Ajuste `TARGET_HOUR` / `TARGET_MINUTE` selon le jour où les créneaux
    s'ouvrent (mardi 16h55 ou vendredi 15h55, par exemple).
 
-**Ne partage jamais ton fichier `.env`.**
+**Ne partage jamais ton fichier `.env` et ne le committe jamais** (il est
+exclu de git via `.gitignore`). Si cela t'arrive un jour, change
+immédiatement ton mot de passe BLS.
 
 ## Lancement
 

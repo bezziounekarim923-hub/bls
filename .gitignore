@@ -1,0 +1,15 @@
+# Secrets — NE JAMAIS versionner
+.env
+
+# Profil Chrome persistant (contient cookies et sessions)
+chrome_profile/
+
+# Journaux
+bls_assistant.log
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
