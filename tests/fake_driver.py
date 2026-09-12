@@ -5,6 +5,7 @@ import re
 from selenium.common.exceptions import (
     InvalidSessionIdException,
     NoSuchElementException,
+    NoSuchWindowException,
     StaleElementReferenceException,
     TimeoutException,
 )
@@ -30,7 +31,7 @@ _ELEMENT_SEQ = [0]
 
 class FakeElement:
     def __init__(self, tag="td", attrs=None, text="", on_click=None, enabled=True,
-                 on_keys=None, driver=None, generation=None):
+                 on_keys=None, driver=None, generation=None, displayed=True):
         _ELEMENT_SEQ[0] += 1
         self.id = f"el-{_ELEMENT_SEQ[0]}"
         self.on_keys = on_keys
@@ -46,6 +47,7 @@ class FakeElement:
         # dernier changement de DOM est « détaché » (stale), comme en vrai.
         self._driver = driver
         self._generation = generation
+        self._displayed = displayed
 
     def _check_stale(self):
         if (self._driver is not None and self._generation is not None
@@ -92,11 +94,17 @@ class FakeElement:
         return self._enabled
 
     def is_displayed(self):
-        return True
+        self._check_stale()
+        return self._displayed
 
 
 class FakeSwitchTo:
+    def __init__(self, driver=None):
+        self._driver = driver
+
     def window(self, handle):
+        if self._driver is not None:
+            self._driver._switch_window(handle)
         return None
 
 
@@ -112,7 +120,12 @@ class FakeDriver:
 
     def __init__(self, page="calendar", months_available=None, logged_in=True, alive=True,
                  stale_menus=False):
-        self.page = page
+        # Un onglet = un état de page indépendant, comme dans un vrai navigateur
+        # (initialisé AVANT tout accès à self.page, qui est une propriété)
+        self._windows = {"w1": {"page": page, "url": URLS[page],
+                                "title": "BLS International"}}
+        self.current_window_handle = "w1"
+        self._switched_to = []
         # stale_menus=True : chaque ouverture/fermeture de menu re-rend la
         # liste (comme React/Radix en vrai) et détache les éléments précédents.
         self.stale_menus = stale_menus
@@ -121,9 +134,7 @@ class FakeDriver:
         self.month_index = 0
         self.logged_in = logged_in
         self.alive = alive
-        self._title = "BLS International"
         self._page_source = PAGE_SOURCE_LONG
-        self._current_url = URLS[page]
         self.on_get = None
         self.links = []          # [{"text": "Book Appointment", "href": ..., "page": "calendar"}]
         # Menus déroulants Radix : {"trigger": "More actions",
@@ -132,32 +143,58 @@ class FakeDriver:
         self.dropdowns = []
         self.gets = []
         self.raise_timeout_on_get = 0
-        self.switch_to = FakeSwitchTo()
-        self.window_handles = ["w1"]
+        self.switch_to = FakeSwitchTo(self)
         self.current_window_handle = "w1"
         self._clicked_days = []
 
     # ---- Attributs qui lèvent quand la session est morte (comme Selenium) ----
 
+    # ---- onglets ----
+
+    @property
+    def window_handles(self):
+        return list(self._windows)
+
+    def _switch_window(self, handle):
+        if handle not in self._windows:
+            raise NoSuchWindowException(f"onglet inconnu : {handle}")
+        self.current_window_handle = handle
+        self._switched_to.append(handle)
+
+    def open_new_tab(self, page, url=None):
+        """Ouvre un onglet (comme un target="_blank") SANS basculer dessus."""
+        handle = f"w{len(self._windows) + 1}"
+        self._windows[handle] = {"page": page, "url": url or URLS.get(page, ""),
+                                 "title": "Prendre rendez-vous"}
+        return handle
+
+    @property
+    def page(self):
+        return self._windows[self.current_window_handle]["page"]
+
+    @page.setter
+    def page(self, value):
+        self._windows[self.current_window_handle]["page"] = value
+
     @property
     def current_url(self):
         if not self.alive:
             raise InvalidSessionIdException("session WebDriver morte")
-        return self._current_url
+        return self._windows[self.current_window_handle]["url"]
 
     @current_url.setter
     def current_url(self, value):
-        self._current_url = value
+        self._windows[self.current_window_handle]["url"] = value
 
     @property
     def title(self):
         if not self.alive:
             raise InvalidSessionIdException("session WebDriver morte")
-        return self._title
+        return self._windows[self.current_window_handle]["title"]
 
     @title.setter
     def title(self, value):
-        self._title = value
+        self._windows[self.current_window_handle]["title"] = value
 
     @property
     def page_source(self):
@@ -273,6 +310,11 @@ class FakeDriver:
 
         # --- menus déroulants Radix ---
         if "dropdown-menu-trigger" in sel or "aria-haspopup" in sel:
+            # Une page d'erreur n'affiche plus la liste des rendez-vous : ses
+            # boutons « More actions » ont disparu du DOM (comme en vrai, où
+            # cliquer un doublon masqué peut faire quitter la page).
+            if self.page == "blank":
+                return []
             return [self._dropdown_trigger(menu) for menu in self.dropdowns]
         if "dropdown-menu-item" in sel or "menuitem" in sel:
             items = []
@@ -347,17 +389,23 @@ class FakeDriver:
             attributes.update({"data-slot": "dropdown-menu-trigger",
                                "aria-haspopup": "menu"})
 
-        return self._tracked(
-            FakeElement("button", attributes, text=label, on_click=action))
+        return self._tracked(FakeElement(
+            "button", attributes, text=label, on_click=action,
+            displayed=not menu.get("hidden", False)))
 
     def _menu_item(self, menu, text):
         def action():
             menu["open"] = False
             self._bump_generation()
             if "slot" in text.lower() or "continue to slot" in text.lower():
-                self.page = menu.get("page", "calendar")
-                self.current_url = URLS.get(self.page, self.current_url)
-                self.title = "Prendre rendez-vous"
+                if menu.get("new_tab"):
+                    # Chrome ouvre un onglet mais Selenium reste sur l'ancien :
+                    # c'est au script de détecter la fenêtre et de basculer.
+                    self.open_new_tab(menu.get("page", "calendar"))
+                else:
+                    self.page = menu.get("page", "calendar")
+                    self.current_url = URLS.get(self.page, self.current_url)
+                    self.title = "Prendre rendez-vous"
 
         return self._tracked(FakeElement(
             "div",

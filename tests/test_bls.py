@@ -906,6 +906,61 @@ check("la séquence inclut pointerup (exigé par les menus Radix)",
 check("la séquence inclut pointerdown et click",
       "pointerdown" in bls.JS_CLICK_SCRIPT and "'click'" in bls.JS_CLICK_SCRIPT)
 
+print("\n=== 20d. Doublon masqué (site responsive) écarté ===")
+# BLS peut dupliquer le même bouton « More actions » (version mobile masquée) :
+# cliquer l'exemplaire invisible ferait échouer tout le parcours.
+hidden_drv = FakeDriver(page="list", logged_in=True)
+hidden_drv.dropdowns = [
+    {"trigger": "More actions", "hidden": True,          # doublon invisible
+     "items": ["Continue to slot selection"], "page": "blank"},
+    {"trigger": "More actions",                          # le vrai, visible
+     "items": ["Continue to slot selection"], "page": "calendar"},
+]
+visible20d = bls.find_dropdown_triggers(hidden_drv)
+check("le déclencheur masqué est écarté", len(visible20d) == 1, len(visible20d))
+check("parcours réussi via le bouton visible",
+      bls.open_dropdown_and_click_slot_item(hidden_drv) is True)
+check("calendrier affiché (et pas la page du doublon)",
+      hidden_drv.page == "calendar", hidden_drv.page)
+
+# Si TOUS les déclencheurs sont masqués, on ne les écarte pas : mieux vaut
+# tenter le clic que de renoncer.
+all_hidden = FakeDriver(page="list", logged_in=True)
+all_hidden.dropdowns = [{"trigger": "More actions", "hidden": True,
+                         "items": ["Continue to slot selection"], "page": "calendar"}]
+check("tous masqués -> quand même retenus en dernier recours",
+      len(bls.find_dropdown_triggers(all_hidden)) == 1)
+check("element_is_visible : élément masqué", bls.element_is_visible(
+    all_hidden._dropdown_trigger(all_hidden.dropdowns[0])) is False)
+
+print("\n=== 20e. Calendrier ouvert dans un NOUVEL ONGLET ===")
+tab_drv = FakeDriver(page="list", logged_in=True)
+tab_drv.dropdowns = [{"trigger": "More actions", "new_tab": True,
+                      "items": ["Cancel Appointment", "Continue to slot selection"],
+                      "page": "calendar"}]
+check("un seul onglet au départ", tab_drv.window_handles == ["w1"], tab_drv.window_handles)
+check("parcours réussi malgré l'ouverture d'un onglet",
+      bls.open_dropdown_and_click_slot_item(tab_drv) is True)
+check("un second onglet a été ouvert", len(tab_drv.window_handles) == 2,
+      tab_drv.window_handles)
+check("le script a basculé sur le nouvel onglet",
+      tab_drv.current_window_handle == "w2", tab_drv.current_window_handle)
+check("calendrier lu dans le bon onglet", tab_drv.page == "calendar", tab_drv.page)
+check("l'onglet d'origine est resté sur la liste",
+      tab_drv._windows["w1"]["page"] == "list", tab_drv._windows["w1"]["page"])
+
+print("\n=== 20f. Nouvel onglet SANS calendrier : retour en arrière ===")
+junk_drv = FakeDriver(page="list", logged_in=True)
+junk_drv.dropdowns = [{"trigger": "More actions", "new_tab": True,
+                       "items": ["Continue to slot selection"], "page": "blank"}]
+check("échec quand le nouvel onglet n'a pas de calendrier",
+      bls.open_dropdown_and_click_slot_item(junk_drv) is False)
+check("retour à l'onglet d'origine", junk_drv.current_window_handle == "w1",
+      junk_drv.current_window_handle)
+check("page d'origine inchangée", junk_drv.page == "list", junk_drv.page)
+check("la fenêtre parasite n'est pas fermée de force",
+      len(junk_drv.window_handles) == 2, junk_drv.window_handles)
+
 print("\n=== 21. Intégration : main() de bout en bout ===")
 import json as _json  # noqa: E402
 import urllib.request  # noqa: E402

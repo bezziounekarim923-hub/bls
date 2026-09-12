@@ -284,6 +284,19 @@ Le script gère ça tout seul, en trois temps :
    accordéon) sont écartés : seuls comptent `data-slot="dropdown-menu-trigger"`,
    `aria-haspopup="menu"`, un libellé évocateur (« more actions », « actions »,
    « options »…) ou une icône « … ».
+
+   Trois autres pièges du site réel sont couverts :
+   - **doublon masqué** — un site responsive duplique parfois le même bouton
+     (exemplaire mobile invisible) ; cliquer l'exemplaire masqué fait quitter
+     la page. Les déclencheurs invisibles sont écartés, sauf s'il ne reste
+     qu'eux (dernier recours) ;
+   - **nouvel onglet** — si le calendrier s'ouvre dans un autre onglet, le
+     script le détecte, bascule dessus et y lit les disponibilités. Si cet
+     onglet ne contient pas le calendrier (publicité, paiement…), il revient à
+     l'onglet d'origine au lieu de surveiller une fenêtre parasite ;
+   - **éléments détachés** — ouvrir puis refermer un menu fait re-rendre la
+     liste : la liste des menus est re-interrogée à chaque essai, pour ne
+     jamais travailler sur une référence périmée (`StaleElementReferenceException`).
 3. **Invite ciblée** — si rien n'y fait, le script te demande de réafficher le
    calendrier dans Chrome (`MAX_MANUAL_PROMPTS` fois). **Relancer Chrome ne
    ramènerait pas un calendrier perdu par une SPA** : la relance n'est donc

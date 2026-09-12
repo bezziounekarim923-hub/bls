@@ -1590,6 +1590,108 @@ def looks_like_action_menu_trigger(element) -> bool:
     return any(icon in html for icon in ("ellipsis", "more-vertical", "more-horizontal", "kebab"))
 
 
+def element_is_visible(element) -> bool:
+    """
+    Vrai si l'élément est affiché et actif.
+
+    Indécis (attribut illisible, élément détaché) -> True : mieux vaut tenter
+    un clic que d'écarter le seul bouton valable.
+    """
+    for probe in ("is_displayed", "is_enabled"):
+        try:
+            check = getattr(element, probe, None)
+            if check is not None and not check():
+                return False
+        except Exception:
+            return True
+    return True
+
+
+def window_handles_snapshot(driver):
+    """Onglets/fenêtres actuellement ouverts (liste vide si illisible)."""
+    try:
+        return list(driver.window_handles or [])
+    except Exception:
+        return []
+
+
+def switch_to_new_window(driver, previous_handles) -> bool:
+    """
+    Bascule sur un onglet ouvert par un clic.
+
+    Certains parcours BLS ouvrent le calendrier dans un NOUVEL onglet : sans
+    bascule, le script continuerait à regarder la liste des rendez-vous et
+    conclurait à tort que le clic n'a rien donné.
+
+    Retourne True si la bascule a eu lieu.
+    """
+    try:
+        current_handles = list(driver.window_handles or [])
+    except Exception:
+        return False
+    fresh = [handle for handle in current_handles if handle not in previous_handles]
+    if not fresh:
+        return False
+    try:
+        driver.switch_to.window(fresh[-1])
+    except Exception as e:
+        logger.debug("Bascule sur le nouvel onglet impossible : %s", e)
+        return False
+    logger.info("Nouvel onglet ouvert par le clic — bascule dessus pour lire le calendrier.")
+    status.event("Bascule sur le nouvel onglet du calendrier", "ok")
+    return True
+
+
+def active_window_handle(driver) -> str:
+    """Identifiant de l'onglet actif (chaîne vide si illisible)."""
+    try:
+        return driver.current_window_handle or ""
+    except Exception:
+        return ""
+
+
+def switch_back_to_window(driver, handle) -> bool:
+    """Revient à un onglet précédemment actif (best effort)."""
+    if not handle:
+        return False
+    try:
+        driver.switch_to.window(handle)
+        return True
+    except Exception as e:
+        logger.debug("Retour à l'onglet d'origine impossible : %s", e)
+        return False
+
+
+def calendar_after_click(driver, handles_before) -> bool:
+    """
+    Calendrier affiché après un clic, y compris s'il s'est ouvert dans un
+    nouvel onglet.
+
+    Si le nouvel onglet ne contient PAS le calendrier (publicité, page de
+    paiement, popup CAPTCHA…), on revient à l'onglet d'origine : la
+    surveillance ne doit jamais se retrouver sur une fenêtre parasite.
+    """
+    sleep_with_jitter(2.5, 0.5)
+    if calendar_is_rendered(driver):
+        return True
+
+    original = active_window_handle(driver)
+    if not switch_to_new_window(driver, handles_before):
+        return False
+
+    sleep_with_jitter(1.5, 0.3)
+    if calendar_is_rendered(driver):
+        return True
+
+    logger.warning(
+        "Le nouvel onglet ne contient pas le calendrier — retour à l'onglet "
+        "d'origine (la fenêtre ouverte est laissée telle quelle)."
+    )
+    status.event("Nouvel onglet sans calendrier : retour en arrière", "warn")
+    switch_back_to_window(driver, original)
+    return False
+
+
 def find_dropdown_triggers(driver):
     """
     Boutons ouvrant un menu d'actions (« More actions », actions, options…).
@@ -1629,7 +1731,18 @@ def find_dropdown_triggers(driver):
                 "Bouton « %s » écarté : pas un menu d'actions.",
                 element_label(trigger) or "?",
             )
-    return unique
+
+    # Un site responsive peut dupliquer le même bouton (version mobile masquée)
+    # : cliquer l'exemplaire invisible ferait échouer le parcours. On privilégie
+    # les boutons affichés, sans jamais écarter les autres s'il n'y a qu'eux.
+    visible = [trigger for trigger in unique if element_is_visible(trigger)]
+    if visible and len(visible) != len(unique):
+        logger.debug(
+            "%d déclencheur(s) masqué(s) écarté(s) — %d visible(s) retenu(s).",
+            len(unique) - len(visible),
+            len(visible),
+        )
+    return visible or unique
 
 
 def find_slot_menu_item(driver, texts=None):
@@ -1704,12 +1817,12 @@ def open_dropdown_and_click_slot_item(driver) -> bool:
             continue
 
         item_label = element_label(item) or "Continue to slot selection"
+        handles_before = window_handles_snapshot(driver)
         if not click_element(driver, item):
             press_escape(driver)
             continue
-        sleep_with_jitter(2.5, 0.5)
 
-        if calendar_is_rendered(driver):
+        if calendar_after_click(driver, handles_before):
             logger.info(
                 "Parcours réussi : « %s » → « %s » — calendrier affiché.",
                 trigger_label,
@@ -1751,12 +1864,11 @@ def click_booking_link(driver, extra_texts=None) -> bool:
     item = find_slot_menu_item(driver)
     if item is not None:
         label = element_label(item) or "entrée de menu"
-        if click_element(driver, item):
-            sleep_with_jitter(2.5, 0.5)
-            if calendar_is_rendered(driver):
-                logger.info("Entrée de menu « %s » cliquée — calendrier affiché.", label)
-                status.event(f"Calendrier retrouvé via l'entrée « {label} »", "ok")
-                return True
+        handles_before = window_handles_snapshot(driver)
+        if click_element(driver, item) and calendar_after_click(driver, handles_before):
+            logger.info("Entrée de menu « %s » cliquée — calendrier affiché.", label)
+            status.event(f"Calendrier retrouvé via l'entrée « {label} »", "ok")
+            return True
 
     # 2. Parcours réel BLS : ouvrir « More actions » puis
     #    cliquer « Continue to slot selection »
@@ -1779,13 +1891,11 @@ def click_booking_link(driver, extra_texts=None) -> bool:
             if is_dangerous_element(element):
                 logger.debug("Lien « %s » ignoré (action à risque).", text)
                 continue
-            try:
-                element.click()
-            except Exception as e:
-                logger.debug("Clic impossible sur « %s » : %s", text, e)
+            handles_before = window_handles_snapshot(driver)
+            if not click_element(driver, element):
+                logger.debug("Clic impossible sur « %s ».", text)
                 continue
-            sleep_with_jitter(2.5, 0.5)
-            if calendar_is_rendered(driver):
+            if calendar_after_click(driver, handles_before):
                 logger.info("Lien « %s » cliqué — calendrier affiché.", text)
                 status.event(f"Calendrier retrouvé via « {text} »", "ok")
                 return True
@@ -1801,13 +1911,11 @@ def click_booking_link(driver, extra_texts=None) -> bool:
             if is_dangerous_element(element):
                 logger.debug("Lien d'URL « %s » ignoré (action à risque).", keyword)
                 continue
-            try:
-                element.click()
-            except Exception as e:
-                logger.debug("Clic impossible sur le lien « %s » : %s", keyword, e)
+            handles_before = window_handles_snapshot(driver)
+            if not click_element(driver, element):
+                logger.debug("Clic impossible sur le lien « %s ».", keyword)
                 continue
-            sleep_with_jitter(2.5, 0.5)
-            if calendar_is_rendered(driver):
+            if calendar_after_click(driver, handles_before):
                 logger.info("Lien d'URL contenant « %s » cliqué — calendrier affiché.", keyword)
                 status.event(f"Calendrier retrouvé via un lien « {keyword} »", "ok")
                 return True
