@@ -2704,6 +2704,7 @@ def main():
 
     driver = None
     slot_found = False
+    fatal_error = None
     try:
         driver = create_driver()
         status.event("Chrome démarré", "ok")
@@ -2740,6 +2741,7 @@ def main():
         logger.info("Arrêt demandé par l'utilisateur.")
         status.event("Arrêt demandé (Ctrl+C)", "warn")
     except Exception as exc:
+        fatal_error = exc
         logger.exception("Erreur fatale : %s", exc)
         status.set(state="ERREUR", state_detail=str(exc)[:200])
         status.event(f"Erreur fatale : {exc}", "error")
@@ -2747,7 +2749,11 @@ def main():
         if not slot_found:
             input(">>> Appuie sur Entrée pour fermer l'assistant...")
     finally:
-        if not slot_found:
+        # Une erreur fatale ou un créneau trouvé prime sur « Arrêté » :
+        # sinon le tableau de bord perdrait l'information utile en fin de course.
+        if fatal_error is not None:
+            status.set(state="ERREUR", state_detail=str(fatal_error)[:200])
+        elif not slot_found:
             status.set(state="ARRET", state_detail="")
         logger.info("Script terminé. Le navigateur reste ouvert.")
         status.flush()
