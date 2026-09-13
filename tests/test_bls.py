@@ -57,6 +57,14 @@ assert bls.STATUS_FILE.startswith(WORK_DIR), bls.STATUS_FILE
 
 _REAL_DATETIME = dt.datetime
 
+# Heure de référence FIGÉE de la suite. Sans cet ancrage, datetime.now() suivait
+# l'heure réelle de la machine : lancée le matin, la section 21 voyait 16 h 55 dans
+# le futur et déroulait un compte à rebours de plusieurs heures au lieu de démarrer
+# immédiatement (test en échec, suite non reproductible). 18 h 00 est choisi après
+# l'heure cible de 16 h 55 et assez loin de minuit pour qu'aucun compte à rebours
+# de la suite ne change de jour (dérive mesurée : 37 min).
+ANCHOR = _REAL_DATETIME(2026, 9, 12, 18, 0, 0)
+
 
 class VirtualClock:
     """Objet `time` factice : sleep() fait avancer l'horloge sans attendre."""
@@ -79,13 +87,13 @@ class VirtualClock:
 
 
 class VirtualDateTime(_REAL_DATETIME):
-    """datetime.now() synchronisé sur l'horloge virtuelle du module testé."""
+    """datetime.now() = ANCHOR + horloge virtuelle, indépendant de l'heure réelle."""
 
     clock = None
 
     @classmethod
     def now(cls, tz=None):
-        base = _REAL_DATETIME.now(tz)
+        base = ANCHOR if tz is None else ANCHOR.replace(tzinfo=tz)
         if cls.clock is None:
             return base
         return base + dt.timedelta(seconds=cls.clock.t - cls.clock.start)
@@ -992,6 +1000,12 @@ def e2e_hook(url, driver):
 e2e.on_get = e2e_hook
 bls.create_driver = lambda: e2e
 bls.TARGET_HOUR, bls.TARGET_MINUTE = 16, 55      # déjà passée -> démarrage immédiat
+# Précondition rendue explicite : c'est elle qui garantissait le démarrage immédiat,
+# et sa violation silencieuse (heure réelle < 16 h 55) faisait basculer main() en
+# compte à rebours. L'ancrage la rend vraie à toute heure réelle de lancement.
+_now21 = bls.datetime.now()
+check("précondition : horloge ancrée et cible 16:55 déjà passée",
+      _now21.date() == ANCHOR.date() and (_now21.hour, _now21.minute) >= (16, 55), _now21)
 
 bls.main()
 builtins.input = lambda prompt="": ""
