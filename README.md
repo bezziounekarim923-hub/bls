@@ -266,6 +266,17 @@ Le script gère ça tout seul, en trois temps :
    des rendez-vous déclenche aussitôt l'ouverture du menu « More actions », au
    lieu d'abandonner et de te rendre la main.
 
+   Les attentes sont **combinées** : après un chargement, le script rend la main
+   dès que le calendrier **ou** la liste des rendez-vous apparaît
+   (`wait_for_calendar_or_list`). Attendre uniquement le calendrier sur l'URL
+   mémorisée — qui est celle de la liste — ferait perdre tout le délai
+   (`CALENDAR_RENDER_TIMEOUT`, 10 s) à **chaque** lancement, self-check,
+   calibrage, relance de Chrome et reconnexion, soit jusqu'à une minute cumulée
+   avant d'arriver au calendrier. La détection de la liste est une sonde légère
+   (un seul `querySelectorAll`, borné à `MAX_DROPDOWN_TRIGGERS` candidats) dont
+   le libellé doit évoquer un menu d'actions : un menu d'en-tête (langue,
+   compte) ne peut donc pas faire conclure « liste » à tort.
+
    L'entrée de menu est un `<div role="menuitem">` qui **n'existe dans le DOM
    qu'une fois le menu ouvert** : le script ouvre donc d'abord le menu, puis
    cherche l'entrée. Plusieurs rendez-vous = plusieurs boutons « More actions »

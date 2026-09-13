@@ -362,6 +362,13 @@ DROPDOWN_TRIGGER_CSS = (
     "[data-slot='dropdown-menu-trigger'], [aria-haspopup='menu'], "
     "[aria-haspopup='listbox'], button[aria-expanded][data-state]"
 )
+
+# Sonde légère de la LISTE des rendez-vous : les deux sélecteurs spécifiques
+# aux menus d'actions, sans le sélecteur lâche
+# « button[aria-expanded][data-state] » qui peut matcher sur d'autres pages et
+# provoquer un faux positif. Un seul querySelectorAll, aucune lecture
+# d'attribut : assez rapide pour être interrogé à chaque tour d'une attente.
+ACTION_MENU_PROBE_CSS = "[data-slot='dropdown-menu-trigger'], [aria-haspopup='menu']"
 DROPDOWN_TRIGGER_TEXTS = (
     "more actions",
     "actions",
@@ -863,20 +870,39 @@ def run_preflight_check(driver, minutes_before: int = PREFLIGHT_MINUTES):
         )
 
     # 3. Le calendrier est-il accessible ?
+    #    Sur BLS l'URL mémorisée mène à la LISTE des rendez-vous : c'est un
+    #    résultat normal (le calendrier est derrière le menu « More actions »),
+    #    pas un échec. Le signaler comme tel évite une alerte trompeuse à
+    #    T-30 min et les 10 s d'attente d'un calendrier qui ne viendra pas.
     saved = load_saved_appointment_url()
     if saved:
         try:
-            calendar_ok = bool(safe_get(driver, saved)) and wait_for_calendar_render(
-                driver, timeout=CALENDAR_RENDER_TIMEOUT
+            reached = (
+                wait_for_calendar_or_list(driver, timeout=CALENDAR_RENDER_TIMEOUT)
+                if safe_get(driver, saved)
+                else ""
             )
         except Exception as e:
-            calendar_ok = False
+            reached = ""
             logger.warning("SELF-CHECK : test du calendrier impossible (%s).", e)
-        if calendar_ok:
+        if reached == "calendar":
+            calendar_ok = True
             logger.info("SELF-CHECK : calendrier accessible ✔ (%s)", saved)
             status.event("SELF-CHECK : calendrier accessible ✔", "ok")
             status.set(month_displayed=visible_month_label(driver), current_url=saved)
+        elif reached == "list":
+            # Le calendrier est à un clic de menu : l'URL mémorisée est bonne.
+            calendar_ok = True
+            logger.info(
+                "SELF-CHECK : liste des rendez-vous accessible ✔ (%s) — le "
+                "calendrier est derrière le menu « More actions », la "
+                "navigation automatique l'atteindra après la connexion.",
+                saved,
+            )
+            status.event("SELF-CHECK : liste des rendez-vous accessible ✔", "ok")
+            status.set(current_url=saved)
         else:
+            calendar_ok = False
             logger.warning(
                 "SELF-CHECK : calendrier non détecté sur l'URL mémorisée — la "
                 "navigation automatique s'en chargera après la connexion."
@@ -1445,11 +1471,83 @@ def calendar_is_rendered(driver) -> bool:
         return False
 
 
+def appointment_list_probe(driver) -> bool:
+    """
+    Sonde légère : la page affiche-t-elle un menu d'actions de la liste des
+    rendez-vous (« More actions ») ?
+
+    Bornée à MAX_DROPDOWN_TRIGGERS candidats et limitée à la lecture du
+    libellé : assez rapide pour être interrogée à chaque tour d'une attente
+    explicite, contrairement à find_dropdown_triggers() dont le repli examine
+    tous les boutons de la page.
+
+    Le libellé doit évoquer un menu d'actions : un menu d'en-tête (langue,
+    compte) ne doit pas faire conclure « liste des rendez-vous », sinon le
+    self-check annoncerait à tort un calendrier accessible. En cas de doute la
+    sonde répond False et l'attente reprend — on retombe alors sur le
+    comportement précédent (plus lent, mais jamais faux).
+
+    Les exceptions de session ne sont volontairement PAS avalées : WebDriverWait
+    ne propage que ce qu'il n'ignore pas, et une session morte (Chrome fermé ou
+    crashé) doit interrompre l'attente immédiatement au lieu de la laisser
+    tourner jusqu'au délai complet. Les éléments détachés (`stale`), eux, sont
+    déjà absorbés par is_dangerous_element() et element_label().
+    """
+    candidates = driver.find_elements(By.CSS_SELECTOR, ACTION_MENU_PROBE_CSS)
+    for element in candidates[:MAX_DROPDOWN_TRIGGERS]:
+        if is_dangerous_element(element):
+            continue
+        label = element_label(element).lower()
+        if any(text in label for text in DROPDOWN_TRIGGER_TEXTS):
+            return True
+    return False
+
+
+def wait_for_calendar_or_list(driver, timeout: float = None) -> str:
+    """
+    Rend la main dès que le calendrier OU la liste des rendez-vous s'affiche.
+
+    Retourne "calendar", "list" ou "" (ni l'un ni l'autre dans le délai).
+
+    Indispensable sur BLS : l'URL mémorisée mène à la LISTE des rendez-vous,
+    jamais directement au calendrier. Attendre seulement le calendrier y ferait
+    perdre tout le délai — 8 à 10 s à chaque lancement, à chaque self-check et
+    à chaque calibrage (donc aussi après chaque relance de Chrome et chaque
+    reconnexion) — avant de pouvoir enchaîner sur le menu « More actions ».
+    """
+    if timeout is None:
+        timeout = CALENDAR_RENDER_TIMEOUT
+
+    def _calendar_ou_liste(drv):
+        # Le calendrier d'abord : une page peut comporter un menu d'actions et
+        # un calendrier, c'est bien le calendrier qui doit l'emporter.
+        if calendar_is_rendered(drv):
+            return "calendar"
+        if appointment_list_probe(drv):
+            return "list"
+        return False
+
+    try:
+        return WebDriverWait(driver, timeout).until(_calendar_ou_liste) or ""
+    except TimeoutException:
+        return ""
+    except Exception as e:
+        logger.debug("Attente calendrier/liste interrompue : %s", e)
+        return ""
+
+
 def goto_appointment_page(driver, url: str) -> bool:
-    """Charge l'URL des créneaux et vérifie que le calendrier s'affiche."""
+    """
+    Charge l'URL des créneaux et vérifie que le calendrier s'affiche.
+
+    Rend aussi la main quand la LISTE des rendez-vous apparaît : sur BLS c'est
+    ce que donne l'URL mémorisée, et attendre le calendrier pendant tout le
+    délai ferait perdre plusieurs secondes à chaque lancement avant de pouvoir
+    enchaîner sur le menu « More actions ».
+    """
     if not safe_get(driver, url):
         return False
-    if wait_for_calendar_render(driver, timeout=8):
+    if wait_for_calendar_or_list(driver, timeout=8) == "calendar":
         logger.info("Calendrier des créneaux affiché : %s", url)
         status.set(current_url=url, month_displayed=visible_month_label(driver))
         return True
@@ -2437,13 +2535,24 @@ def calibrate_refresh_mode(driver, appointment_url: str) -> str:
         status.set(refresh_mode="soft")
         return "soft"
 
-    if wait_for_calendar_render(driver, timeout=CALENDAR_RENDER_TIMEOUT):
+    # Attente combinée : sur BLS le rechargement ramène à la LISTE des
+    # rendez-vous, pas au calendrier. Attendre seulement le calendrier ferait
+    # perdre tout le délai avant de passer au parcours de clics.
+    reached = wait_for_calendar_or_list(driver, timeout=CALENDAR_RENDER_TIMEOUT)
+    if reached == "calendar":
         logger.info(
             "Calibrage : le rechargement complet affiche le calendrier — mode « reload »."
         )
         status.event("Mode de rafraîchissement : reload (l'URL affiche le calendrier)", "ok")
         status.set(refresh_mode="reload", month_displayed=visible_month_label(driver))
         return "reload"
+
+    if reached == "list":
+        logger.info(
+            "Calibrage : le rechargement ramène à la liste des rendez-vous — le "
+            "calendrier dépend du menu « More actions » (mode « soft » attendu)."
+        )
+        status.event("Calibrage : rechargement → liste des rendez-vous")
 
     if click_booking_link(driver, extra_texts=BOOKING_STEP_TEXTS):
         # Le parcours de clics peut mener à une autre URL (route interne du

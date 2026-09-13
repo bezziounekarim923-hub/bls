@@ -1300,6 +1300,206 @@ check("26.4 la borne est configurable et encadrée",
 check("26.5 les 60 premiers boutons seulement examinés",
       max(many.touched) < bls.MAX_BUTTON_FALLBACK, max(many.touched))
 
+print("\n=== 27. Latence : ne pas attendre le calendrier sur une page qui est la liste ===")
+
+
+class PollingWait:
+    """
+    Imitation fidèle du vrai WebDriverWait : sonde la condition toutes les
+    0,5 s jusqu'à l'expiration du délai (l'horloge virtuelle avance vraiment).
+
+    Nécessaire ici : le FakeWait habituel évalue la condition une fois pour
+    toutes et ne peut donc pas mesurer le temps perdu par un chemin d'attente.
+    """
+
+    def __init__(self, driver, timeout, poll_frequency=0.5, **kwargs):
+        self.driver = driver
+        self.timeout = timeout
+        self.poll_frequency = poll_frequency
+
+    def until(self, condition, message=""):
+        deadline = bls.time.monotonic() + self.timeout
+        while True:
+            try:
+                value = condition(self.driver)
+                if value:
+                    return value
+            except bls.NoSuchElementException:
+                # Seul cas ignoré par le vrai WebDriverWait : toute autre
+                # exception (session morte, fenêtre fermée) doit remonter et
+                # interrompre l'attente immédiatement.
+                pass
+            if bls.time.monotonic() >= deadline:
+                raise bls.TimeoutException(message or "attente expirée (polling)")
+            bls.time.sleep(self.poll_frequency)
+
+
+SLOT_MENU = [{"trigger": "More actions",
+              "items": ["Cancel Appointment", "Continue to slot selection"],
+              "page": "calendar"}]
+
+saved_wait27 = bls.WebDriverWait
+bls.WebDriverWait = PollingWait
+try:
+    # Chemin AVANT le correctif : attendre seulement le calendrier sur la liste
+    old_drv = FakeDriver(page="list", logged_in=True)
+    old_drv.dropdowns = list(SLOT_MENU)
+    t0 = bls.time.monotonic()
+    old_result = bls.wait_for_calendar_render(old_drv, timeout=8)
+    old_cost = bls.time.monotonic() - t0
+
+    # Chemin APRÈS : attente combinée calendrier OU liste
+    new_drv = FakeDriver(page="list", logged_in=True)
+    new_drv.dropdowns = list(SLOT_MENU)
+    t1 = bls.time.monotonic()
+    new_result = bls.wait_for_calendar_or_list(new_drv, timeout=8)
+    new_cost = bls.time.monotonic() - t1
+finally:
+    bls.WebDriverWait = saved_wait27
+
+check("27.1 ancien chemin : échoue sur la liste", old_result is False, old_result)
+check("27.2 ancien chemin : brûle tout le délai (~8 s)", old_cost >= 7.5, old_cost)
+check("27.3 nouveau chemin : détecte la liste", new_result == "list", new_result)
+check("27.4 nouveau chemin : rend la main immédiatement", new_cost <= 0.5, new_cost)
+check("27.5 gain mesuré >= 7 s par navigation", old_cost - new_cost >= 7.0,
+      (old_cost, new_cost))
+
+# Sémantique de l'attente combinée sur les trois types de page
+cal27 = FakeDriver(page="calendar", logged_in=True)
+check("27.6 page calendrier -> « calendar »",
+      bls.wait_for_calendar_or_list(cal27, timeout=2) == "calendar")
+list27 = FakeDriver(page="list", logged_in=True)
+list27.dropdowns = list(SLOT_MENU)
+check("27.7 page liste -> « list »",
+      bls.wait_for_calendar_or_list(list27, timeout=2) == "list")
+acct27 = FakeDriver(page="account", logged_in=True)
+check("27.8 page compte -> chaîne vide",
+      bls.wait_for_calendar_or_list(acct27, timeout=2) == "")
+
+# Un menu d'en-tête (langue, compte) ne doit pas faire conclure « liste »
+lang27 = FakeDriver(page="list", logged_in=True)
+lang27.dropdowns = [{"trigger": "English", "items": ["Français", "Español"],
+                     "page": "list"}]
+check("27.9 sonde : menu de langue ignoré",
+      bls.appointment_list_probe(lang27) is False)
+check("27.10 attente combinée : pas de faux « list »",
+      bls.wait_for_calendar_or_list(lang27, timeout=2) == "")
+check("27.11 sonde : vrai menu d'actions détecté",
+      bls.appointment_list_probe(list27) is True)
+
+# Self-check à T-30 min : une URL qui mène à la liste est un succès, pas un échec
+hub27 = fresh_status()
+logs27 = capture_logs()
+pref27 = FakeDriver(page="account", logged_in=True)
+pref27.dropdowns = list(SLOT_MENU)
+pref27.on_get = lambda url, drv: setattr(
+    drv, "page", "account" if url.endswith(".com/") else "list")
+drv27, ready27 = bls.run_preflight_check(pref27, minutes_before=30)
+snap27 = hub27.snapshot()
+check("27.12 self-check : calendar_ok=True sur la liste",
+      snap27["preflight"]["calendar_ok"] is True, snap27["preflight"])
+check("27.13 self-check : succès journalisé sans ambiguïté",
+      "liste des rendez-vous accessible" in logs27.text())
+check("27.14 self-check : aucune alerte « calendrier non détecté »",
+      "SELF-CHECK : calendrier non détecté" not in logs27.text())
+check("27.15 self-check : conclut « prêt »", ready27 is True, ready27)
+check("27.16 self-check : aucune relance de Chrome", drv27 is pref27)
+
+# Calibrage : un rechargement qui ramène à la liste -> mode « soft » + enchaînement
+hub27b = fresh_status()
+logs27b = capture_logs()
+cal27b = FakeDriver(page="list", logged_in=True)
+cal27b.dropdowns = list(SLOT_MENU)
+cal27b.on_get = lambda url, drv: setattr(drv, "page", "list")
+mode27 = bls.calibrate_refresh_mode(cal27b, APPOINTMENT_URL)
+snap27b = hub27b.snapshot()
+check("27.17 calibrage : mode « soft » choisi", mode27 == "soft", mode27)
+check("27.18 calibrage : diagnostic exact journalisé",
+      "ramène à la liste des rendez-vous" in logs27b.text())
+check("27.19 calibrage : calendrier atteint dans la foulée",
+      cal27b.page == "calendar", cal27b.page)
+check("27.20 calibrage : « Cancel Appointment » jamais cliqué",
+      "Cancel Appointment" not in cal27b._clicked_texts, cal27b._clicked_texts)
+check("27.21 calibrage : mode publié au tableau de bord",
+      snap27b["refresh_mode"] == "soft", snap27b["refresh_mode"])
+
+# goto_appointment_page rend la main au lieu d'épuiser son délai sur la liste
+bls.WebDriverWait = PollingWait
+try:
+    goto27 = FakeDriver(page="list", logged_in=True)
+    goto27.dropdowns = list(SLOT_MENU)
+    goto27.on_get = lambda url, drv: setattr(drv, "page", "list")
+    t2 = bls.time.monotonic()
+    goto_ok = bls.goto_appointment_page(goto27, APPOINTMENT_URL)
+    goto_cost = bls.time.monotonic() - t2
+finally:
+    bls.WebDriverWait = saved_wait27
+check("27.22 goto_appointment_page : False sur la liste (pas le calendrier)",
+      goto_ok is False, goto_ok)
+check("27.23 goto_appointment_page : n'épuise pas son délai de 8 s",
+      goto_cost <= 1.0, goto_cost)
+
+print("\n=== 28. Session morte pendant l'attente : interruption immédiate ===")
+# Une attente qui avale les exceptions de session continue de sonder un
+# navigateur déjà mort jusqu'à l'expiration du délai : jusqu'à 10 s perdues
+# avant que la relance automatique de Chrome puisse être décidée.
+
+
+def dead_list_driver():
+    """Driver dont la session WebDriver est morte (Chrome fermé/crashé)."""
+    dead = FakeDriver(page="list", logged_in=True, alive=False)
+    dead.dropdowns = list(SLOT_MENU)
+    return dead
+
+
+saved_wait28 = bls.WebDriverWait
+saved_probe28 = bls.appointment_list_probe
+bls.WebDriverWait = PollingWait
+try:
+    # Comportement courant : l'exception de session remonte, l'attente s'arrête
+    t0 = bls.time.monotonic()
+    res28 = bls.wait_for_calendar_or_list(dead_list_driver(), timeout=10)
+    cost28 = bls.time.monotonic() - t0
+
+    # Contre-épreuve : une sonde qui avale l'exception (ancien comportement)
+    # brûle tout le délai pour le même résultat final.
+    def swallowing_probe(driver):
+        try:
+            return saved_probe28(driver)
+        except Exception:
+            return False
+
+    bls.appointment_list_probe = swallowing_probe
+    t1 = bls.time.monotonic()
+    res28b = bls.wait_for_calendar_or_list(dead_list_driver(), timeout=10)
+    cost28b = bls.time.monotonic() - t1
+finally:
+    bls.WebDriverWait = saved_wait28
+    bls.appointment_list_probe = saved_probe28
+
+check("28.1 session morte : aucun résultat inventé", res28 == "", res28)
+check("28.2 session morte : attente interrompue immédiatement", cost28 <= 0.5, cost28)
+check("28.3 contre-épreuve : une sonde qui avale brûle tout le délai",
+      cost28b >= 9.5, cost28b)
+check("28.4 contre-épreuve : même résultat final, mais 10 s plus tard",
+      res28b == res28, (res28b, res28))
+check("28.5 au moins 9 s récupérées avant de pouvoir relancer Chrome",
+      cost28b - cost28 >= 9.0, cost28b - cost28)
+# Vérification directe : la sonde ne masque plus la mort de la session,
+# tandis que le test du calendrier reste tolérant (il est interrogé en premier
+# à chaque tour de scrutin et ne doit jamais faire échouer l'attente).
+try:
+    bls.appointment_list_probe(dead_list_driver())
+    raised28 = False
+except Exception as exc28:
+    raised28 = True
+    type28 = type(exc28).__name__
+check("28.6 appointment_list_probe propage l'exception de session", raised28 is True)
+check("28.7 il s'agit bien d'une session invalide", raised28 and type28 == "InvalidSessionIdException",
+      type28 if raised28 else "aucune exception")
+check("28.8 calendar_is_rendered reste tolérant (False, pas d'exception)",
+      bls.calendar_is_rendered(dead_list_driver()) is False)
+
 print("\n" + "=" * 66)
 print(f"RESULTAT : {len(PASSED)} verifications OK, {len(FAILED)} en echec")
 for failure in FAILED:
