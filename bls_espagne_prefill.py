@@ -960,7 +960,6 @@ def run_final_check(driver):
         logger.warning("CONTRÔLE FINAL : session expirée juste avant l'ouverture !")
         status.set(session="expirée", state="SESSION_EXPIREE")
         status.event("CONTRÔLE FINAL : session expirée", "warn")
-        beep_alert(times=3)
         if AUTO_RELOGIN_ON_EXPIRY and BLS_EMAIL and BLS_PASSWORD:
             status.set(state="RECONNEXION")
             if login(driver, interactive=False):
@@ -969,6 +968,12 @@ def run_final_check(driver):
                 logger.info("CONTRÔLE FINAL : reconnexion automatique réussie ✔")
                 status.event("CONTRÔLE FINAL : reconnexion automatique réussie ✔", "ok")
                 return driver
+        # Bip + invite SEULEMENT si la reconnexion automatique a échoué (ou
+        # n'était pas possible). Alerter avant d'avoir tenté le re-login
+        # réveillerait l'utilisateur pour une session qu'on vient de rétablir
+        # tout seul : le bip doit signifier « j'ai besoin de toi », pas
+        # « quelque chose s'est passé ».
+        beep_alert(times=3)
         input(">>> Appuie sur Entrée une fois reconnecté dans Chrome…")
         status.set(session="active", state="COMPTE_A_REBOURS")
     else:

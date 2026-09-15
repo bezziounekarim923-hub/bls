@@ -555,6 +555,43 @@ check("contrôle final : reconnexion automatique", expired_final.logged_in is Tr
 check("contrôle final : relogins compté", status_hub12.snapshot()["relogins"] == 1, status_hub12.snapshot()["relogins"])
 check("contrôle final : driver conservé", out3 is expired_final)
 
+print("\n=== 11c. Contrôle final : le bip ne sonne QUE si le re-login échoue ===")
+# Consigne : reconnexion automatique d'abord, bip + invite seulement à l'échec.
+# Un bip émis avant la tentative réveillerait l'utilisateur pour une session
+# que le script vient de rétablir tout seul. On compte bips et invites.
+beeps11c, prompts11c = [], []
+real_beep, real_input, real_login = bls.beep_alert, builtins.input, bls.login
+bls.beep_alert = lambda times=5: beeps11c.append(times)
+builtins.input = lambda prompt="": (prompts11c.append(prompt), "")[1]
+bls.AUTO_RELOGIN_ON_EXPIRY = True
+bls.BLS_EMAIL, bls.BLS_PASSWORD = "test@example.com", "mot-de-passe-test"
+bls.FINAL_CHECK_MINUTES = 2
+
+# Cas 1 : la reconnexion automatique RÉUSSIT -> ni bip ni invite.
+status_hub14 = fresh_status()
+ok_final = FakeDriver(page="login", logged_in=False)
+ok_final.on_get = lambda url, drv: setattr(drv, "page", "account" if drv.logged_in else "login")
+out4 = bls.run_final_check(ok_final)
+check("11c.1 reconnexion réussie -> session rétablie", ok_final.logged_in is True)
+check("11c.2 reconnexion réussie -> AUCUN bip (pas de fausse alerte)", beeps11c == [], beeps11c)
+check("11c.3 reconnexion réussie -> aucune invite bloquante", prompts11c == [], prompts11c)
+check("11c.4 reconnexion réussie -> driver conservé", out4 is ok_final)
+
+# Cas 2 : la reconnexion automatique ÉCHOUE -> bip + invite.
+# bls.login est stubbé pour que l'échec soit déterministe, indépendamment
+# de la façon dont FakeDriver simule la soumission du formulaire.
+beeps11c.clear()
+prompts11c.clear()
+status_hub15 = fresh_status()
+bls.login = lambda driver, interactive=True: False
+ko_final = FakeDriver(page="login", logged_in=False)
+out5 = bls.run_final_check(ko_final)
+check("11c.5 reconnexion échouée -> bip émis", beeps11c == [3], beeps11c)
+check("11c.6 reconnexion échouée -> invite manuelle", len(prompts11c) == 1, prompts11c)
+check("11c.7 reconnexion échouée -> driver conservé", out5 is ko_final)
+
+bls.beep_alert, builtins.input, bls.login = real_beep, real_input, real_login
+
 print("\n=== 12. Connexion non interactive (reconnexion auto) ===")
 status_hub13 = fresh_status()
 interactive_prompts = []
